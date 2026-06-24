@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build_app.sh —— 在 mac 上一键打包成 .app(零基础也能跑)
 set -e
+cd "$(dirname "$0")/.."  # 始终以项目根目录为工作目录
 
 echo "==> [1/4] 选择一个【非 conda】的 python(关键!)"
 # py2app + conda 会导致 libffi.8.dylib 缺失、.app 启动即崩,
@@ -63,8 +64,8 @@ pip install --upgrade pip
 pip install rumps py2app Pillow
 
 echo "==> [3.5/4] 生成图标(若缺失)"
-if [ ! -f AppIcon.icns ] && [ -f icon_src.jpeg ]; then
-  python make_icons.py icon_src.jpeg
+if [ ! -f assets/AppIcon.icns ] && [ -f assets/icon_src.jpeg ]; then
+  python scripts/make_icons.py assets/icon_src.jpeg
 fi
 
 echo "==> [4/4] 打包"
@@ -72,7 +73,7 @@ rm -rf build dist
 python setup.py py2app
 
 echo "==> [收尾] 修复可能缺失的 libffi(conda 环境保险)"
-[ -f fix_libffi.sh ] && bash fix_libffi.sh dist/CCMonitor.app || true
+[ -f scripts/fix_libffi.sh ] && bash scripts/fix_libffi.sh dist/CCMonitor.app || true
 
 echo ""
 echo "✅ 完成!产物在:  dist/CCMonitor.app"

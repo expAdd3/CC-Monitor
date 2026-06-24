@@ -13,7 +13,7 @@ APP = ["cc_monitor.py"]
 
 OPTIONS = {
     "argv_emulation": False,
-    "iconfile": "AppIcon.icns",   # ← .app 应用图标
+    "iconfile": "assets/AppIcon.icns",   # ← .app 应用图标
     "plist": {
         "CFBundleName": "CCMonitor",
         "CFBundleDisplayName": "Claude Code Monitor",
@@ -25,7 +25,7 @@ OPTIONS = {
         "NSHumanReadableCopyright": "Personal tool",
     },
     "packages": ["rumps"],
-    "resources": ["menubar_color.png", "menubar_color@2x.png"],
+    "resources": ["assets/menubar_color.png", "assets/menubar_color@2x.png"],
     # cc_hook.py 是被 Claude Code 单独调用的,不打进 app;随仓库分发即可
 }
 

@@ -33,10 +33,10 @@ app_icon = rounded(src)
 
 # Pillow 直接存 icns(包含多分辨率)
 sizes = [16, 32, 64, 128, 256, 512, 1024]
-app_icon.save("AppIcon.icns", format="ICNS",
+app_icon.save("assets/AppIcon.icns", format="ICNS",
               append_images=[app_icon.resize((s, s), Image.LANCZOS) for s in sizes])
 # 同时存一张 png 预览
-app_icon.resize((512, 512), Image.LANCZOS).save("AppIcon_preview.png")
+app_icon.resize((512, 512), Image.LANCZOS).save("assets/AppIcon_preview.png")
 print("✅ AppIcon.icns 生成")
 
 # ---------- 2. 菜单栏模板图 ----------
@@ -58,6 +58,6 @@ def make_menubar(size):
     d.ellipse([cx - dot, cy - dot, cx + dot, cy + dot], fill=black)
     return img
 
-make_menubar(18).save("menubar_icon.png")
-make_menubar(36).save("menubar_icon@2x.png")
+make_menubar(18).save("assets/menubar_icon.png")
+make_menubar(36).save("assets/menubar_icon@2x.png")
 print("✅ menubar_icon.png / @2x 生成")

@@ -10,8 +10,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('menubar_color.png', '.'),
-        ('menubar_color@2x.png', '.'),
+        ('assets/menubar_color.png', 'assets'),
+        ('assets/menubar_color@2x.png', 'assets'),
     ],
     hiddenimports=['rumps'],   # rumps 内部动态导入 pyobjc,显式声明更稳
     hookspath=[],
@@ -34,7 +34,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='CCMonitor.app',
-    icon='AppIcon.icns',
+    icon='assets/AppIcon.icns',
     bundle_identifier='com.ccmonitor.app',
     info_plist={
         'LSUIElement': True,          # 纯菜单栏,不进 Dock、不抢焦点

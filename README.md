@@ -54,7 +54,7 @@ python3 cc_monitor.py     # 常驻菜单栏
 ## 打包成 .app(可选,长期使用)
 
 ```bash
-./build_app.sh            # 产物 dist/CCMonitor.app,拖进 /Applications 双击即用
+./scripts/build_app.sh     # 产物 dist/CCMonitor.app,拖进 /Applications 双击即用
 ```
 
 ⚠️ **别用 conda 的 Python 打包**(见下方踩坑记录),`build_app.sh` 会自动挑选非 conda 的 Python。
@@ -74,11 +74,11 @@ pkill -f cc_monitor       # 退出菜单栏 App
 | `cc_monitor.py` | 菜单栏 App 主程序(读库、聚合、去重通知、日志兜底) |
 | `cc_hook.py` | Hook 上报端,被 CC 调用,确定性写入状态库 |
 | `install_hooks.py` / `uninstall.py` | 注册 / 卸载 hook |
-| `setup.py` / `build_app.sh` | py2app 打包(及一键脚本) |
-| `CCMonitor.spec` / `build_app_pyinstaller.sh` | PyInstaller 打包(备选方案) |
-| `fix_libffi.sh` | 修复 conda 打包导致的 libffi 缺失 |
-| `make_icons.py` | 从源图生成图标 |
-| `AppIcon.icns` / `menubar_color*.png` | 应用图标 / 菜单栏图标 |
+| `setup.py` / `scripts/build_app.sh` | py2app 打包(及一键脚本) |
+| `CCMonitor.spec` / `scripts/build_app_pyinstaller.sh` | PyInstaller 打包(备选方案) |
+| `scripts/fix_libffi.sh` | 修复 conda 打包导致的 libffi 缺失 |
+| `scripts/make_icons.py` | 从源图生成图标 |
+| `assets/AppIcon.icns` / `assets/menubar_color*.png` | 应用图标 / 菜单栏图标 |
 
 ## 踩坑记录
 
@@ -117,6 +117,6 @@ EOF
 
 ## 演示
 常驻状态：
-![alt text](56bc948d103c09c5e3f8cfb16d21cfc7.jpg)
+![alt text](assets/demo-menubar.jpg)
 完成通知：
-![alt text](b2caa4ffb5b877a7c77920996ddcb0cf.jpg)
+![alt text](assets/demo-notification.jpg)

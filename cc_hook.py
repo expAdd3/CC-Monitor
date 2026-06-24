@@ -90,12 +90,13 @@ def upsert(conn, payload):
 
     status = EVENT_TO_STATUS.get(event, "RUNNING")
 
-    # 通知种类:Stop 类 → DONE;Notification → NEEDS_INPUT
+    # 通知种类: Stop/StopFailure → DONE; Notification → NEEDS_INPUT
+    # 基于事件而非派生状态，避免 SessionStart 也触发 DONE 通知
     notify_kind = None
     notify_pending = 0
-    if status == "WAITING":
+    if event in ("Stop", "StopFailure"):
         notify_kind, notify_pending = "DONE", 1
-    elif status == "NEEDS_INPUT":
+    elif event == "Notification":
         notify_kind, notify_pending = "NEEDS_INPUT", 1
 
     # turn_started_ts:开始新一轮时记一次,用于算"这轮跑了多久"
@@ -142,16 +143,19 @@ def main():
         payload = {}
 
     for attempt in range(3):
+        conn = None
         try:
             conn = connect()
             ensure_schema(conn)
             upsert(conn, payload)
-            conn.close()
             break
         except sqlite3.OperationalError:
             time.sleep(0.2 * (attempt + 1))  # 锁竞争,退避重试
         except Exception:
             break  # 任何其它异常都不能影响 CC
+        finally:
+            if conn:
+                conn.close()
 
     sys.exit(0)  # 永远成功退出,绝不阻断 Claude Code
 
