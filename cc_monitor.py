@@ -19,7 +19,14 @@ import time
 import glob
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import cc_pricing
+except Exception:
+    cc_pricing = None
 
 DB_DIR  = os.path.expanduser("~/.cc-monitor")
 DB_PATH = os.path.join(DB_DIR, "state.db")
@@ -63,12 +70,26 @@ def ensure_schema(conn):
         session_id TEXT PRIMARY KEY, cwd TEXT, project TEXT, status TEXT,
         last_event TEXT, last_event_ts REAL, turn_started_ts REAL,
         notify_pending INTEGER DEFAULT 0, notify_kind TEXT,
-        transcript_path TEXT, source TEXT DEFAULT 'hook'
+        transcript_path TEXT, source TEXT DEFAULT 'hook',
+        tok_input INTEGER DEFAULT 0, tok_output INTEGER DEFAULT 0,
+        tok_cache_write INTEGER DEFAULT 0, tok_cache_read INTEGER DEFAULT 0,
+        tok_total INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0,
+        cost_known INTEGER DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, event TEXT, ts REAL
     );
     """)
+    for col, decl in (
+        ("tok_input", "INTEGER DEFAULT 0"), ("tok_output", "INTEGER DEFAULT 0"),
+        ("tok_cache_write", "INTEGER DEFAULT 0"), ("tok_cache_read", "INTEGER DEFAULT 0"),
+        ("tok_total", "INTEGER DEFAULT 0"), ("cost_usd", "REAL DEFAULT 0"),
+        ("cost_known", "INTEGER DEFAULT 1"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
 
 
@@ -176,10 +197,24 @@ def merge_log_fallback(conn):
                 continue
             status, idle = res
             notify_pending = 0  # 首次发现不通知;状态转换时由 UPDATE 子句置 1
+            u = None
+            if cc_pricing:
+                try:
+                    u = cc_pricing.summarize_transcript(f)
+                except Exception:
+                    u = None
+            ti = u["input"] if u else 0
+            to = u["output"] if u else 0
+            tcw = u["cache_write"] if u else 0
+            tcr = u["cache_read"] if u else 0
+            tt = u["total_tokens"] if u else 0
+            cost = u["cost_usd"] if u else 0.0
+            ck = 1 if (u.get("cost_known", True) if u else True) else 0
             conn.execute("""
                 INSERT INTO sessions(session_id,cwd,project,status,last_event,
-                    last_event_ts,notify_pending,notify_kind,transcript_path,source)
-                VALUES(?,?,?,?,?,?,?,?,?, 'log')
+                    last_event_ts,notify_pending,notify_kind,transcript_path,source,
+                    tok_input,tok_output,tok_cache_write,tok_cache_read,tok_total,cost_usd,cost_known)
+                VALUES(?,?,?,?,?,?,?,?,?, 'log', ?,?,?,?,?,?,?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     project=excluded.project, status=excluded.status,
                     last_event_ts=excluded.last_event_ts,
@@ -189,10 +224,18 @@ def merge_log_fallback(conn):
                     notify_kind=CASE WHEN sessions.status != 'WAITING'
                                       AND excluded.status = 'WAITING'
                                       THEN 'DONE' ELSE sessions.notify_kind END,
-                    source='log'
+                    source='log',
+                    tok_input=excluded.tok_input,
+                    tok_output=excluded.tok_output,
+                    tok_cache_write=excluded.tok_cache_write,
+                    tok_cache_read=excluded.tok_cache_read,
+                    tok_total=excluded.tok_total,
+                    cost_usd=excluded.cost_usd,
+                    cost_known=excluded.cost_known
                 WHERE sessions.source!='hook'
             """, (sid, "", project, status, "log:"+status, now - idle,
-                  notify_pending, None, f))
+                  notify_pending, None, f,
+                  ti, to, tcw, tcr, tt, cost, ck))
     conn.commit()
 
 
@@ -244,8 +287,21 @@ def summarize(conn):
         idle = int(now - r["last_event_ts"])
         icon = {"RUNNING": "🟢", "WAITING": "🟡", "NEEDS_INPUT": "🔴"}.get(st, "⚪")
         tag = "hook" if r["source"] == "hook" else "log"
-        items.append(f'{icon} {r["project"]}  [{st} · {idle}s · {tag}]')
-    return counts, items
+        suffix = ""
+        if cc_pricing:
+            tt = r["tok_total"] if "tok_total" in r.keys() else 0
+            if tt:
+                suffix = f'  {cc_pricing.fmt_tokens(tt)} tok'
+        items.append(f'{icon} {r["project"]}  [{st} · {idle}s · {tag}]{suffix}')
+
+    today_start = time.mktime(datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0).timetuple())
+    trow = conn.execute(
+        "SELECT COALESCE(SUM(tok_total),0) tt FROM sessions WHERE last_event_ts >= ?",
+        (today_start,)
+    ).fetchone()
+    totals = {"tok_total": trow["tt"] or 0}
+    return counts, items, totals
 
 
 # ========================= 菜单栏 App =========================
@@ -303,15 +359,21 @@ def build_app():
             try:
                 merge_log_fallback(self.conn)
                 drain_notifications(self.conn)
-                counts, items = summarize(self.conn)
+                counts, items, totals = summarize(self.conn)
             except Exception:
                 self.title = " ⚠️"
                 return
             r, w, n = counts["RUNNING"], counts["WAITING"], counts["NEEDS_INPUT"]
             # 有图标时只显示数字,无图标时回退到 "CC" 前缀
             prefix = "" if icon_path else "CC "
-            self.title = f"{prefix}🟢{r} 🟡{w}" + (f" 🔴{n}" if n else "")
-            menu = [f"运行中 {r} · 待处理 {w} · 需介入 {n}", None]
+            tok_tag = ""
+            if cc_pricing and totals["tok_total"]:
+                tok_tag = f' · {cc_pricing.fmt_tokens(totals["tok_total"])}'
+            self.title = f"{prefix}🟢{r} 🟡{w}" + (f" 🔴{n}" if n else "") + tok_tag
+            head = f"运行中 {r} · 待处理 {w} · 需介入 {n}"
+            if cc_pricing and totals["tok_total"]:
+                head += f"   今日 {cc_pricing.fmt_tokens(totals['tok_total'])} tok"
+            menu = [head, None]
             menu += items if items else ["(暂无活跃会话)"]
             # 每次重建都手动补回「退出」,否则 clear() 会把它清掉
             menu += [None, rumps.MenuItem("退出 CC Monitor",
@@ -331,11 +393,14 @@ def run_cli():
         while True:
             merge_log_fallback(conn)
             drain_notifications(conn)
-            counts, items = summarize(conn)
+            counts, items, totals = summarize(conn)
             os.system("clear")
+            extra = ""
+            if cc_pricing and totals["tok_total"]:
+                extra = f"  |  今日 {cc_pricing.fmt_tokens(totals['tok_total'])} tok"
             print(f"[{datetime.now():%H:%M:%S}] "
                   f"运行中 {counts['RUNNING']} · 待处理 {counts['WAITING']} "
-                  f"· 需介入 {counts['NEEDS_INPUT']}\n")
+                  f"· 需介入 {counts['NEEDS_INPUT']}{extra}\n")
             for it in items:
                 print(" ", it)
             time.sleep(REFRESH_SEC)

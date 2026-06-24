@@ -25,6 +25,7 @@ OPTIONS = {
         "NSHumanReadableCopyright": "Personal tool",
     },
     "packages": ["rumps"],
+    "includes": ["cc_pricing"],
     "resources": ["assets/menubar_color.png", "assets/menubar_color@2x.png"],
     # cc_hook.py 是被 Claude Code 单独调用的,不打进 app;随仓库分发即可
 }
