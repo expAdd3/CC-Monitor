@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build_app_pyinstaller.sh —— 用 PyInstaller 打包(py2app 失败时用这个)
 set -e
+cd "$(dirname "$0")/.."  # 始终以项目根目录为工作目录
 
 echo "==> [1/4] 选择一个【非 conda】的 python(关键!)"
 # conda 的 python 会导致打包出的 .app 缺 libffi.8.dylib 而崩溃。
@@ -52,8 +53,8 @@ echo "==> [3/4] 安装 rumps + pyinstaller + Pillow"
 pip install rumps pyinstaller Pillow
 
 echo "==> [3.5/4] 生成图标(若缺失)"
-if [ ! -f AppIcon.icns ] && [ -f icon_src.jpeg ]; then
-  python make_icons.py icon_src.jpeg
+if [ ! -f assets/AppIcon.icns ] && [ -f assets/icon_src.jpeg ]; then
+  python scripts/make_icons.py assets/icon_src.jpeg
 fi
 
 echo "==> [4/4] 打包"

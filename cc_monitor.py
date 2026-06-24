@@ -271,9 +271,9 @@ def build_app():
     icon_path = None
     icon_ns   = None
     for cand in (
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "menubar_color.png"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "menubar_color.png"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     "..", "Resources", "menubar_color.png"),
+                     "..", "Resources", "assets", "menubar_color.png"),
     ):
         if os.path.exists(cand):
             icon_path = cand
