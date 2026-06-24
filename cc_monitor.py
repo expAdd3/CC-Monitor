@@ -30,6 +30,15 @@ IDLE_HIDE_SEC = 1800    # 超过该秒无活动的会话不显示
 FALLBACK_RUNNING_GAP = 8    # 日志兜底:静默 < 此值视为运行中
 FALLBACK_WAIT_GAP    = 30   # 日志兜底:静默 > 此值且最后是助手文本 → 等待
 
+# ========================= 内部/插件会话过滤 =========================
+# CC 用路径编码项目目录名: "/" → "-", "." → "-"
+# 用户项目:  -Users-<name>-code-MyProject          (无 "--")
+# 内部会话:  -Users-<name>--claude-mem-observer-sessions  ("--" 来自 /.claude-mem/)
+# 规律: "--" 一定来源于路径中的隐藏/点目录, 是内部基础设施, 不需要监控
+def _is_internal_project(project_name):
+    """项目目录名含 '--' 表示路径中有隐藏/内部目录, 不监控不通知。"""
+    return "--" in (project_name or "")
+
 try:
     import rumps
     HAS_RUMPS = True
@@ -143,40 +152,47 @@ def infer_status_from_log(path):
 
 def merge_log_fallback(conn):
     """把 hook 没覆盖到的活跃会话,用日志补进 DB(source='log')。"""
-    files = glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl"))
     now = time.time()
-    known = {r["session_id"] for r in conn.execute("SELECT session_id FROM sessions")}
     hooked = {r["session_id"] for r in
               conn.execute("SELECT session_id FROM sessions WHERE source='hook'")}
-    for f in files:
-        try:
-            if now - os.path.getmtime(f) > IDLE_HIDE_SEC:
+    # 先按目录过滤，避免遍历内部/插件会话的巨量文件
+    for proj_dir in glob.glob(os.path.join(PROJECTS_DIR, "*")):
+        if not os.path.isdir(proj_dir):
+            continue
+        project = os.path.basename(proj_dir)
+        if _is_internal_project(project):
+            continue
+        for f in glob.glob(os.path.join(proj_dir, "*.jsonl")):
+            try:
+                if now - os.path.getmtime(f) > IDLE_HIDE_SEC:
+                    continue
+            except OSError:
                 continue
-        except OSError:
-            continue
-        sid = os.path.splitext(os.path.basename(f))[0]
-        if sid in hooked:
-            continue   # 已有确定性 hook 数据,不用日志覆盖
-        res = infer_status_from_log(f)
-        if not res:
-            continue
-        status, idle = res
-        project = os.path.basename(os.path.dirname(f))
-        notify_pending = 1 if status == "WAITING" else 0
-        conn.execute("""
-            INSERT INTO sessions(session_id,cwd,project,status,last_event,
-                last_event_ts,notify_pending,notify_kind,transcript_path,source)
-            VALUES(?,?,?,?,?,?,?,?,?, 'log')
-            ON CONFLICT(session_id) DO UPDATE SET
-                project=excluded.project, status=excluded.status,
-                last_event_ts=excluded.last_event_ts,
-                notify_pending=MAX(sessions.notify_pending, excluded.notify_pending),
-                notify_kind=CASE WHEN excluded.notify_pending=1 THEN 'DONE'
-                                 ELSE sessions.notify_kind END,
-                source='log'
-            WHERE sessions.source!='hook'
-        """, (sid, "", project, status, "log:"+status, now - idle,
-              notify_pending, "DONE" if notify_pending else None, f))
+            sid = os.path.splitext(os.path.basename(f))[0]
+            if sid in hooked:
+                continue   # 已有确定性 hook 数据,不用日志覆盖
+            res = infer_status_from_log(f)
+            if not res:
+                continue
+            status, idle = res
+            notify_pending = 0  # 首次发现不通知;状态转换时由 UPDATE 子句置 1
+            conn.execute("""
+                INSERT INTO sessions(session_id,cwd,project,status,last_event,
+                    last_event_ts,notify_pending,notify_kind,transcript_path,source)
+                VALUES(?,?,?,?,?,?,?,?,?, 'log')
+                ON CONFLICT(session_id) DO UPDATE SET
+                    project=excluded.project, status=excluded.status,
+                    last_event_ts=excluded.last_event_ts,
+                    notify_pending=CASE WHEN sessions.status != 'WAITING'
+                                         AND excluded.status = 'WAITING'
+                                         THEN 1 ELSE sessions.notify_pending END,
+                    notify_kind=CASE WHEN sessions.status != 'WAITING'
+                                      AND excluded.status = 'WAITING'
+                                      THEN 'DONE' ELSE sessions.notify_kind END,
+                    source='log'
+                WHERE sessions.source!='hook'
+            """, (sid, "", project, status, "log:"+status, now - idle,
+                  notify_pending, None, f))
     conn.commit()
 
 
@@ -213,12 +229,16 @@ def drain_notifications(conn):
 def summarize(conn):
     now = time.time()
     rows = conn.execute(
-        "SELECT * FROM sessions WHERE last_event_ts > ? ORDER BY last_event_ts DESC",
+        "SELECT * FROM sessions WHERE last_event_ts > ? AND status != 'ENDED' "
+        "ORDER BY last_event_ts DESC",
         (now - IDLE_HIDE_SEC,)
     ).fetchall()
     counts = {"RUNNING": 0, "WAITING": 0, "NEEDS_INPUT": 0}
     items = []
     for r in rows:
+        # 跳过不需要监控的插件/内部会话(点目录 → 编码为 "--")
+        if _is_internal_project(r["project"]):
+            continue
         st = r["status"]
         counts[st] = counts.get(st, 0) + 1
         idle = int(now - r["last_event_ts"])
@@ -233,8 +253,23 @@ def summarize(conn):
 # 环境里,仅仅 import 本模块(如单元测试)就会因 class 定义求值 rumps.App 而崩。
 
 def build_app():
-    # 菜单栏模板图标:打包后在 .app 的 Resources 里,源码运行时在脚本同目录
+    # 菜单栏图标: 手动加载 1x + 2x 避免 Retina 模糊
+    def _load_icon(base_path):
+        """加载 1x 和 @2x 合成 NSImage，确保 Retina 清晰。"""
+        from Cocoa import NSImage, NSBitmapImageRep, NSData
+        img = NSImage.alloc().initWithSize_((22, 22))
+        for suffix in ("", "@2x"):
+            path = base_path.replace(".png", f"{suffix}.png")
+            if os.path.exists(path):
+                data = NSData.dataWithContentsOfFile_(path)
+                rep = NSBitmapImageRep.alloc().initWithData_(data)
+                if rep:
+                    rep.setSize_((22, 22))  # point size, pixels handled by scale
+                    img.addRepresentation_(rep)
+        return img
+
     icon_path = None
+    icon_ns   = None
     for cand in (
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "menubar_color.png"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -242,16 +277,27 @@ def build_app():
     ):
         if os.path.exists(cand):
             icon_path = cand
+            icon_ns   = _load_icon(cand)
             break
 
     class CCMonitor(rumps.App):
         def __init__(self):
             super().__init__("CC", icon=icon_path, template=False,
                              quit_button=None)   # 关掉自动退出键,改为手动维护
+            if icon_ns is not None:
+                self._icon_nsimage = icon_ns  # 替换为 Retina 合成图标
             self.conn = connect()
             ensure_schema(self.conn)
             self.timer = rumps.Timer(self.tick, REFRESH_SEC)
             self.timer.start()
+
+        def cleanup_quit(self, _):
+            """关闭数据库连接后再退出。"""
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            rumps.quit_application(None)
 
         def tick(self, _):
             try:
@@ -269,7 +315,7 @@ def build_app():
             menu += items if items else ["(暂无活跃会话)"]
             # 每次重建都手动补回「退出」,否则 clear() 会把它清掉
             menu += [None, rumps.MenuItem("退出 CC Monitor",
-                                          callback=rumps.quit_application)]
+                                          callback=self.cleanup_quit)]
             self.menu.clear()
             self.menu = menu
 
@@ -295,6 +341,8 @@ def run_cli():
             time.sleep(REFRESH_SEC)
     except KeyboardInterrupt:
         pass
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
