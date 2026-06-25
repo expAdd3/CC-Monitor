@@ -109,6 +109,66 @@ def today_key():
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def _aggregate_usage(by_day):
+    return {
+        "input": sum(d["input"] for d in by_day.values()),
+        "output": sum(d["output"] for d in by_day.values()),
+        "cache_write": sum(d["cache_write"] for d in by_day.values()),
+        "cache_read": sum(d["cache_read"] for d in by_day.values()),
+        "total_tokens": sum(d["total_tokens"] for d in by_day.values()),
+        "cost_usd": sum(d["cost_usd"] for d in by_day.values()),
+        "cost_known": all(d.get("cost_known", True) for d in by_day.values()),
+    }
+
+
+def _daily_usage_matches(conn, session_id, by_day):
+    rows = conn.execute("""
+        SELECT day, tok_input, tok_output, tok_cache_write, tok_cache_read,
+               tok_total, cost_usd, cost_known
+        FROM daily_session_usage
+        WHERE session_id=?
+    """, (session_id,)).fetchall()
+    if len(rows) != len(by_day):
+        return False
+    current = {r["day"]: r for r in rows}
+    for day, du in by_day.items():
+        r = current.get(day)
+        if not r:
+            return False
+        day_cost_known = 1 if du.get("cost_known", True) else 0
+        if (
+            r["tok_input"] != du["input"]
+            or r["tok_output"] != du["output"]
+            or r["tok_cache_write"] != du["cache_write"]
+            or r["tok_cache_read"] != du["cache_read"]
+            or r["tok_total"] != du["total_tokens"]
+            or abs((r["cost_usd"] or 0.0) - (du["cost_usd"] or 0.0)) >= 1e-12
+            or r["cost_known"] != day_cost_known
+        ):
+            return False
+    return True
+
+
+def _replace_daily_usage(conn, session_id, by_day):
+    conn.execute(
+        "DELETE FROM daily_session_usage WHERE session_id=?",
+        (session_id,),
+    )
+    for day, du in by_day.items():
+        day_cost_known = 1 if du.get("cost_known", True) else 0
+        conn.execute("""
+            INSERT INTO daily_session_usage(
+                day, session_id, tok_input, tok_output,
+                tok_cache_write, tok_cache_read, tok_total,
+                cost_usd, cost_known
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+        """, (
+            day, session_id, du["input"], du["output"],
+            du["cache_write"], du["cache_read"], du["total_tokens"],
+            du["cost_usd"], day_cost_known,
+        ))
+
+
 # ========================= 日志兜底解析 =========================
 # 仅用于"DB 里没有、但日志在动"的会话(没装 hook 的旧会话)。
 # 修复点对照旧版:
@@ -214,9 +274,11 @@ def merge_log_fallback(conn):
             status, idle = res
             notify_pending = 0  # 首次发现不通知;状态转换时由 UPDATE 子句置 1
             u = None
+            by_day = None
             if cc_pricing:
                 try:
-                    u = cc_pricing.summarize_transcript(f)
+                    by_day = cc_pricing.summarize_transcript_by_day(f)
+                    u = _aggregate_usage(by_day) if by_day else None
                 except Exception:
                     u = None
             ti = u["input"] if u else 0
@@ -252,6 +314,8 @@ def merge_log_fallback(conn):
             """, (sid, "", project, status, "log:"+status, now - idle,
                   notify_pending, None, f,
                   ti, to, tcw, tcr, tt, cost, ck))
+            if by_day is not None and not _daily_usage_matches(conn, sid, by_day):
+                _replace_daily_usage(conn, sid, by_day)
     conn.commit()
 
 
@@ -286,20 +350,8 @@ def refresh_hook_usage(conn):
             continue
         if not by_day:   # 空的 transcript，无数据可更新
             continue
-        u = {
-            "input": sum(d["input"] for d in by_day.values()),
-            "output": sum(d["output"] for d in by_day.values()),
-            "cache_write": sum(d["cache_write"] for d in by_day.values()),
-            "cache_read": sum(d["cache_read"] for d in by_day.values()),
-            "total_tokens": sum(d["total_tokens"] for d in by_day.values()),
-            "cost_usd": sum(d["cost_usd"] for d in by_day.values()),
-            "cost_known": all(d.get("cost_known", True) for d in by_day.values()),
-        }
+        u = _aggregate_usage(by_day)
         cost_known = 1 if u.get("cost_known", True) else 0
-        has_daily = conn.execute(
-            "SELECT 1 FROM daily_session_usage WHERE session_id=? AND day=? LIMIT 1",
-            (r["session_id"], today_key()),
-        ).fetchone() is not None
         if (
             r["tok_input"] == u["input"]
             and r["tok_output"] == u["output"]
@@ -308,27 +360,10 @@ def refresh_hook_usage(conn):
             and r["tok_total"] == u["total_tokens"]
             and abs((r["cost_usd"] or 0.0) - (u["cost_usd"] or 0.0)) < 1e-12
             and r["cost_known"] == cost_known
-            and has_daily
+            and _daily_usage_matches(conn, r["session_id"], by_day)
         ):
             continue
-        conn.execute(
-            "DELETE FROM daily_session_usage WHERE session_id=?",
-            (r["session_id"],),
-        )
-        if by_day:
-            for day, du in by_day.items():
-                day_cost_known = 1 if du.get("cost_known", True) else 0
-                conn.execute("""
-                    INSERT INTO daily_session_usage(
-                        day, session_id, tok_input, tok_output,
-                        tok_cache_write, tok_cache_read, tok_total,
-                        cost_usd, cost_known
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
-                """, (
-                    day, r["session_id"], du["input"], du["output"],
-                    du["cache_write"], du["cache_read"], du["total_tokens"],
-                    du["cost_usd"], day_cost_known,
-                ))
+        _replace_daily_usage(conn, r["session_id"], by_day)
         conn.execute("""
             UPDATE sessions SET
                 tok_input=?,
