@@ -24,12 +24,6 @@ import json
 import time
 import sqlite3
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-try:
-    import cc_pricing
-except Exception:
-    cc_pricing = None  # 计费模块缺失也不能让 hook 挂掉
-
 DB_DIR = os.path.expanduser("~/.cc-monitor")
 DB_PATH = os.path.join(DB_DIR, "state.db")
 
@@ -125,13 +119,6 @@ def upsert(conn, payload):
     elif event == "Notification":
         notify_kind, notify_pending = "NEEDS_INPUT", 1
 
-    usage = None
-    if cc_pricing and tpath and event in ("Stop", "StopFailure", "SessionEnd"):
-        try:
-            usage = cc_pricing.summarize_transcript(tpath)
-        except Exception:
-            usage = None
-
     # turn_started_ts:开始新一轮时记一次,用于算"这轮跑了多久"
     turn_started = now if event == "UserPromptSubmit" else None
 
@@ -141,58 +128,26 @@ def upsert(conn, payload):
     if row and turn_started is None:
         turn_started = row[0]
 
-    if usage:
-        conn.execute("""
-            INSERT INTO sessions
-                (session_id, cwd, project, status, last_event, last_event_ts,
-                 turn_started_ts, notify_pending, notify_kind, transcript_path, source,
-                 tok_input, tok_output, tok_cache_write, tok_cache_read, tok_total, cost_usd, cost_known)
-            VALUES (?,?,?,?,?,?,?,?,?,?, 'hook', ?,?,?,?,?,?,?)
-            ON CONFLICT(session_id) DO UPDATE SET
-                cwd=excluded.cwd,
-                project=excluded.project,
-                status=excluded.status,
-                last_event=excluded.last_event,
-                last_event_ts=excluded.last_event_ts,
-                turn_started_ts=excluded.turn_started_ts,
-                notify_pending=MAX(sessions.notify_pending, excluded.notify_pending),
-                notify_kind=CASE WHEN excluded.notify_pending=1
-                                 THEN excluded.notify_kind ELSE sessions.notify_kind END,
-                transcript_path=excluded.transcript_path,
-                source='hook',
-                tok_input=excluded.tok_input,
-                tok_output=excluded.tok_output,
-                tok_cache_write=excluded.tok_cache_write,
-                tok_cache_read=excluded.tok_cache_read,
-                tok_total=excluded.tok_total,
-                cost_usd=excluded.cost_usd,
-                cost_known=excluded.cost_known
-        """, (sid, cwd, project, status, event, now,
-              turn_started, notify_pending, notify_kind, tpath,
-              usage["input"], usage["output"], usage["cache_write"],
-              usage["cache_read"], usage["total_tokens"], usage["cost_usd"],
-              1 if usage.get("cost_known", True) else 0))
-    else:
-        conn.execute("""
-            INSERT INTO sessions
-                (session_id, cwd, project, status, last_event, last_event_ts,
-                 turn_started_ts, notify_pending, notify_kind, transcript_path, source)
-            VALUES (?,?,?,?,?,?,?,?,?,?, 'hook')
-            ON CONFLICT(session_id) DO UPDATE SET
-                cwd=excluded.cwd,
-                project=excluded.project,
-                status=excluded.status,
-                last_event=excluded.last_event,
-                last_event_ts=excluded.last_event_ts,
-                turn_started_ts=excluded.turn_started_ts,
-                -- 通知是"取或":新事件要求弹,就置 1;不主动清(清由 App 负责)
-                notify_pending=MAX(sessions.notify_pending, excluded.notify_pending),
-                notify_kind=CASE WHEN excluded.notify_pending=1
-                                 THEN excluded.notify_kind ELSE sessions.notify_kind END,
-                transcript_path=excluded.transcript_path,
-                source='hook'
-        """, (sid, cwd, project, status, event, now,
-              turn_started, notify_pending, notify_kind, tpath))
+    conn.execute("""
+        INSERT INTO sessions
+            (session_id, cwd, project, status, last_event, last_event_ts,
+             turn_started_ts, notify_pending, notify_kind, transcript_path, source)
+        VALUES (?,?,?,?,?,?,?,?,?,?, 'hook')
+        ON CONFLICT(session_id) DO UPDATE SET
+            cwd=excluded.cwd,
+            project=excluded.project,
+            status=excluded.status,
+            last_event=excluded.last_event,
+            last_event_ts=excluded.last_event_ts,
+            turn_started_ts=excluded.turn_started_ts,
+            -- 通知是"取或":新事件要求弹,就置 1;不主动清(清由 App 负责)
+            notify_pending=MAX(sessions.notify_pending, excluded.notify_pending),
+            notify_kind=CASE WHEN excluded.notify_pending=1
+                             THEN excluded.notify_kind ELSE sessions.notify_kind END,
+            transcript_path=excluded.transcript_path,
+            source='hook'
+    """, (sid, cwd, project, status, event, now,
+          turn_started, notify_pending, notify_kind, tpath))
 
     conn.execute("INSERT INTO events(session_id,event,ts) VALUES(?,?,?)",
                  (sid, event, now))

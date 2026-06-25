@@ -15,6 +15,7 @@ token 数 vs. 算钱,是两件事:
 """
 import os
 import json
+from datetime import datetime, timezone
 
 MTOK = 1_000_000.0
 
@@ -35,13 +36,29 @@ _BUILTIN_PRICES = {
 }
 
 _USER_PRICES_PATH = os.path.expanduser("~/.cc-monitor/prices.json")
+_PRICES_CACHE = None
+_SUMMARY_CACHE = {}
+
+
+def _prices_cache_key():
+    try:
+        st = os.stat(_USER_PRICES_PATH)
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
 
 
 def _load_prices():
+    global _PRICES_CACHE
+    cache_key = _prices_cache_key()
+    if _PRICES_CACHE and _PRICES_CACHE[0] == cache_key:
+        return dict(_PRICES_CACHE[1])
+
     prices = dict(_BUILTIN_PRICES)
     try:
-        if os.path.exists(_USER_PRICES_PATH):
-            user = json.load(open(_USER_PRICES_PATH))
+        if cache_key is not None:
+            with open(_USER_PRICES_PATH) as fp:
+                user = json.load(fp)
             for k, v in user.items():
                 if isinstance(v, (list, tuple)) and len(v) == 4:
                     prices[k.lower()] = tuple(float(x) for x in v)
@@ -51,6 +68,7 @@ def _load_prices():
                         float(v.get("cache_read", 0)), float(v.get("output", 0)))
     except Exception:
         pass
+    _PRICES_CACHE = (cache_key, prices)
     return prices
 
 
@@ -102,7 +120,38 @@ def cost_of(usage: dict, model: str):
     return cost, True
 
 
-def _iter_usages(path):
+def _usage_record(obj):
+    if obj.get("type") != "assistant":
+        return None
+    # 排除 claude-mem 等插件的后台/侧链消息
+    if obj.get("isSidechain"):
+        return None
+    msg = obj.get("message") or {}
+    usage = msg.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return {
+        "usage": usage,
+        "model": msg.get("model", ""),
+        "final": bool(msg.get("stop_reason")),
+        "day": _day_from_timestamp(obj.get("timestamp")),
+    }
+
+
+def _day_from_timestamp(ts):
+    if not ts:
+        return datetime.now().strftime("%Y-%m-%d")
+    try:
+        if isinstance(ts, (int, float)):
+            dt = datetime.fromtimestamp(ts, timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def _iter_usage_records(path):
     try:
         with open(path, "rb") as fp:
             for line in fp:
@@ -113,28 +162,51 @@ def _iter_usages(path):
                     obj = json.loads(s)
                 except Exception:
                     continue
-                if obj.get("type") != "assistant":
-                    continue
-                msg = obj.get("message") or {}
-                usage = msg.get("usage")
-                if isinstance(usage, dict):
-                    yield usage, msg.get("model", "")
+                rec = _usage_record(obj)
+                if rec:
+                    yield rec
     except OSError:
         return
 
 
+def _dedup_usage_records(path):
+    finalized = []
+    latest_streaming = None
+    for rec in _iter_usage_records(path):
+        if rec["final"]:
+            finalized.append(rec)
+            latest_streaming = None
+        else:
+            latest_streaming = rec
+    if latest_streaming:
+        finalized.append(latest_streaming)
+    return finalized
+
+
 def summarize_transcript(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
+                "cost_usd": 0.0, "cost_known": True, "total_tokens": 0}
+
+    cache_key = (st.st_size, st.st_mtime_ns, _prices_cache_key())
+    cached = _SUMMARY_CACHE.get(path)
+    if cached and cached[0] == cache_key:
+        return dict(cached[1])
+
     agg = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
            "cost_usd": 0.0, "cost_known": True}
     saw_any = False
-    for usage, model in _iter_usages(path):
+    for rec in _dedup_usage_records(path):
         saw_any = True
+        usage = rec["usage"]
         u = extract_usage(usage)
         agg["input"] += u["input"]
         agg["output"] += u["output"]
         agg["cache_write"] += u["cache_write"]
         agg["cache_read"] += u["cache_read"]
-        c, known = cost_of(usage, model)
+        c, known = cost_of(usage, rec["model"])
         agg["cost_usd"] += c
         if not known:
             agg["cost_known"] = False
@@ -145,7 +217,47 @@ def summarize_transcript(path):
     agg["total_tokens"] = (
         agg["input"] + agg["output"] + agg["cache_write"] + agg["cache_read"]
     )
+    _SUMMARY_CACHE[path] = (cache_key, dict(agg))
     return agg
+
+
+def summarize_transcript_by_day(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+
+    cache_key = ("by_day", st.st_size, st.st_mtime_ns, _prices_cache_key())
+    cached = _SUMMARY_CACHE.get((path, "by_day"))
+    if cached and cached[0] == cache_key:
+        return {day: dict(usage) for day, usage in cached[1].items()}
+
+    by_day = {}
+    for rec in _dedup_usage_records(path):
+        day = rec["day"]
+        usage = rec["usage"]
+        u = extract_usage(usage)
+        agg = by_day.setdefault(day, {
+            "input": 0, "output": 0, "cache_write": 0, "cache_read": 0,
+            "cost_usd": 0.0, "cost_known": True,
+        })
+        agg["input"] += u["input"]
+        agg["output"] += u["output"]
+        agg["cache_write"] += u["cache_write"]
+        agg["cache_read"] += u["cache_read"]
+        c, known = cost_of(usage, rec["model"])
+        agg["cost_usd"] += c
+        if not known:
+            agg["cost_known"] = False
+
+    for agg in by_day.values():
+        agg["total_tokens"] = (
+            agg["input"] + agg["output"] + agg["cache_write"] + agg["cache_read"]
+        )
+    _SUMMARY_CACHE[(path, "by_day")] = (
+        cache_key, {day: dict(usage) for day, usage in by_day.items()}
+    )
+    return by_day
 
 
 def fmt_tokens(n: int) -> str:

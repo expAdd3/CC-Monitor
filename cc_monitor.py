@@ -79,6 +79,18 @@ def ensure_schema(conn):
     CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, event TEXT, ts REAL
     );
+    CREATE TABLE IF NOT EXISTS daily_session_usage (
+        day TEXT,
+        session_id TEXT,
+        tok_input INTEGER DEFAULT 0,
+        tok_output INTEGER DEFAULT 0,
+        tok_cache_write INTEGER DEFAULT 0,
+        tok_cache_read INTEGER DEFAULT 0,
+        tok_total INTEGER DEFAULT 0,
+        cost_usd REAL DEFAULT 0,
+        cost_known INTEGER DEFAULT 1,
+        PRIMARY KEY(day, session_id)
+    );
     """)
     for col, decl in (
         ("tok_input", "INTEGER DEFAULT 0"), ("tok_output", "INTEGER DEFAULT 0"),
@@ -91,6 +103,10 @@ def ensure_schema(conn):
         except sqlite3.OperationalError:
             pass
     conn.commit()
+
+
+def today_key():
+    return datetime.now().strftime("%Y-%m-%d")
 
 
 # ========================= 日志兜底解析 =========================
@@ -239,6 +255,100 @@ def merge_log_fallback(conn):
     conn.commit()
 
 
+def refresh_hook_usage(conn):
+    """后台刷新 hook 会话的 transcript 用量，避开 Stop hook 早于日志落盘的问题。"""
+    if not cc_pricing:
+        return
+    rows = conn.execute("""
+        SELECT session_id, transcript_path, tok_input, tok_output,
+               tok_cache_write, tok_cache_read, tok_total, cost_usd, cost_known
+        FROM sessions
+        WHERE source='hook'
+          AND transcript_path IS NOT NULL
+          AND transcript_path != ''
+          AND (
+              status != 'ENDED'
+              OR last_event_ts >= ?
+              OR NOT EXISTS (
+                  SELECT 1 FROM daily_session_usage
+                  WHERE daily_session_usage.session_id = sessions.session_id
+              )
+          )
+    """, (
+        time.mktime(datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0).timetuple()),
+    )).fetchall()
+    changed = False
+    for r in rows:
+        try:
+            by_day = cc_pricing.summarize_transcript_by_day(r["transcript_path"])
+        except Exception:
+            continue
+        if not by_day:   # 空的 transcript，无数据可更新
+            continue
+        u = {
+            "input": sum(d["input"] for d in by_day.values()),
+            "output": sum(d["output"] for d in by_day.values()),
+            "cache_write": sum(d["cache_write"] for d in by_day.values()),
+            "cache_read": sum(d["cache_read"] for d in by_day.values()),
+            "total_tokens": sum(d["total_tokens"] for d in by_day.values()),
+            "cost_usd": sum(d["cost_usd"] for d in by_day.values()),
+            "cost_known": all(d.get("cost_known", True) for d in by_day.values()),
+        }
+        cost_known = 1 if u.get("cost_known", True) else 0
+        has_daily = conn.execute(
+            "SELECT 1 FROM daily_session_usage WHERE session_id=? AND day=? LIMIT 1",
+            (r["session_id"], today_key()),
+        ).fetchone() is not None
+        if (
+            r["tok_input"] == u["input"]
+            and r["tok_output"] == u["output"]
+            and r["tok_cache_write"] == u["cache_write"]
+            and r["tok_cache_read"] == u["cache_read"]
+            and r["tok_total"] == u["total_tokens"]
+            and abs((r["cost_usd"] or 0.0) - (u["cost_usd"] or 0.0)) < 1e-12
+            and r["cost_known"] == cost_known
+            and has_daily
+        ):
+            continue
+        conn.execute(
+            "DELETE FROM daily_session_usage WHERE session_id=?",
+            (r["session_id"],),
+        )
+        if by_day:
+            for day, du in by_day.items():
+                day_cost_known = 1 if du.get("cost_known", True) else 0
+                conn.execute("""
+                    INSERT INTO daily_session_usage(
+                        day, session_id, tok_input, tok_output,
+                        tok_cache_write, tok_cache_read, tok_total,
+                        cost_usd, cost_known
+                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                """, (
+                    day, r["session_id"], du["input"], du["output"],
+                    du["cache_write"], du["cache_read"], du["total_tokens"],
+                    du["cost_usd"], day_cost_known,
+                ))
+        conn.execute("""
+            UPDATE sessions SET
+                tok_input=?,
+                tok_output=?,
+                tok_cache_write=?,
+                tok_cache_read=?,
+                tok_total=?,
+                cost_usd=?,
+                cost_known=?
+            WHERE session_id=?
+        """, (
+            u["input"], u["output"], u["cache_write"], u["cache_read"],
+            u["total_tokens"], u["cost_usd"], cost_known,
+            r["session_id"],
+        ))
+        changed = True
+    if changed:
+        conn.commit()
+
+
 # ========================= 通知(唯一出口) =========================
 
 def macos_notify(title, subtitle, text):
@@ -294,13 +404,18 @@ def summarize(conn):
                 suffix = f'  {cc_pricing.fmt_tokens(tt)} tok'
         items.append(f'{icon} {r["project"]}  [{st} · {idle}s · {tag}]{suffix}')
 
-    today_start = time.mktime(datetime.now().replace(
-        hour=0, minute=0, second=0, microsecond=0).timetuple())
     trow = conn.execute(
-        "SELECT COALESCE(SUM(tok_total),0) tt FROM sessions WHERE last_event_ts >= ?",
-        (today_start,)
+        "SELECT COALESCE(SUM(tok_total),0) tok_total, "
+        "COALESCE(SUM(cost_usd),0) cost_usd, "
+        "COALESCE(MIN(cost_known),1) cost_known "
+        "FROM daily_session_usage WHERE day=?",
+        (today_key(),)
     ).fetchone()
-    totals = {"tok_total": trow["tt"] or 0}
+    totals = {
+        "tok_total": (trow["tok_total"] if trow else 0) or 0,
+        "cost_usd": (trow["cost_usd"] if trow else 0.0) or 0.0,
+        "cost_known": (trow["cost_known"] if trow else 1),
+    }
     return counts, items, totals
 
 
@@ -358,6 +473,7 @@ def build_app():
         def tick(self, _):
             try:
                 merge_log_fallback(self.conn)
+                refresh_hook_usage(self.conn)
                 drain_notifications(self.conn)
                 counts, items, totals = summarize(self.conn)
             except Exception:
@@ -392,6 +508,7 @@ def run_cli():
     try:
         while True:
             merge_log_fallback(conn)
+            refresh_hook_usage(conn)
             drain_notifications(conn)
             counts, items, totals = summarize(conn)
             os.system("clear")
