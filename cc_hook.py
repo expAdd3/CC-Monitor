@@ -14,7 +14,7 @@ cc_hook.py —— Claude Code Hook 上报端(确定性事件源)
 
 注册方式(写入 ~/.claude/settings.json,见文末 SETTINGS_SNIPPET):
   对 Stop / Notification / SessionStart / SessionEnd / UserPromptSubmit /
-  PostToolUse 这几个事件各挂一条:
+  PostToolUse / PreToolUse(AskUserQuestion) 这几个事件各挂一条:
       python3 /绝对路径/cc_hook.py
 """
 
@@ -35,17 +35,13 @@ DB_PATH = os.path.join(DB_DIR, "state.db")
 EVENT_TO_STATUS = {
     "SessionStart":     "WAITING",     # 起会话,等首条 prompt
     "UserPromptSubmit": "RUNNING",     # 你发了一句,它开始干
-    "PreToolUse":       "RUNNING",     # 心跳
+    "PreToolUse":       "RUNNING",     # 心跳; AskUserQuestion 会在 upsert 中特殊处理
     "PostToolUse":      "RUNNING",     # 心跳
     "Notification":     "NEEDS_INPUT", # 要授权 / 长时间等待
     "Stop":             "WAITING",     # ★ 一轮结束 → 关键通知信号
     "StopFailure":      "WAITING",     # 出错也算停了,需要你看一眼
     "SessionEnd":       "ENDED",
 }
-
-# 哪些状态是"需要弹通知的边沿"(由 App 读 notify_pending 决定是否真弹)
-NOTIFY_STATES = {"WAITING", "NEEDS_INPUT"}
-
 
 def connect():
     os.makedirs(DB_DIR, exist_ok=True)
@@ -80,6 +76,23 @@ def ensure_schema(conn):
     """)
 
 
+def is_ask_user_question(payload):
+    return (
+        payload.get("hook_event_name") == "PreToolUse"
+        and payload.get("tool_name") == "AskUserQuestion"
+    )
+
+
+def get_previous_session(conn, sid):
+    row = conn.execute(
+        "SELECT status,last_event,turn_started_ts FROM sessions WHERE session_id=?",
+        (sid,),
+    ).fetchone()
+    if not row:
+        return None, None, None
+    return row[0], row[1], row[2]
+
+
 def upsert(conn, payload):
     sid   = payload.get("session_id") or "unknown"
     event = payload.get("hook_event_name") or "unknown"
@@ -88,25 +101,34 @@ def upsert(conn, payload):
     project = os.path.basename(cwd.rstrip("/")) if cwd else "(unknown)"
     now = time.time()
 
-    status = EVENT_TO_STATUS.get(event, "RUNNING")
+    ask_user_question = is_ask_user_question(payload)
+    status = "NEEDS_INPUT" if ask_user_question else EVENT_TO_STATUS.get(event, "RUNNING")
+    previous_status, previous_event, previous_turn_started = get_previous_session(conn, sid)
 
-    # 通知种类: Stop/StopFailure → DONE; Notification → NEEDS_INPUT
+    # 通知种类: Stop/StopFailure → DONE; Notification/AskUserQuestion → NEEDS_INPUT
     # 基于事件而非派生状态，避免 SessionStart 也触发 DONE 通知
     notify_kind = None
     notify_pending = 0
     if event in ("Stop", "StopFailure"):
-        notify_kind, notify_pending = "DONE", 1
-    elif event == "Notification":
+        if previous_status == "NEEDS_INPUT" and previous_event == "PreToolUse":
+            status = "NEEDS_INPUT"
+        else:
+            notify_kind, notify_pending = "DONE", 1
+    elif ask_user_question:
         notify_kind, notify_pending = "NEEDS_INPUT", 1
+    elif event == "Notification":
+        # AskUserQuestion 已设为 NEEDS_INPUT 时不重复通知
+        if previous_status != "NEEDS_INPUT":
+            notify_kind, notify_pending = "NEEDS_INPUT", 1
+
+    # 用户回应后清除待通知，避免 drain 在用户已回应后弹窗
+    if event == "UserPromptSubmit":
+        conn.execute("UPDATE sessions SET notify_pending=0 WHERE session_id=?", (sid,))
 
     # turn_started_ts:开始新一轮时记一次,用于算"这轮跑了多久"
     turn_started = now if event == "UserPromptSubmit" else None
-
-    row = conn.execute(
-        "SELECT turn_started_ts FROM sessions WHERE session_id=?", (sid,)
-    ).fetchone()
-    if row and turn_started is None:
-        turn_started = row[0]
+    if turn_started is None:
+        turn_started = previous_turn_started
 
     conn.execute("""
         INSERT INTO sessions

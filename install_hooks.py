@@ -13,7 +13,10 @@ install_hooks.py —— 把 cc_hook.py 注册进 ~/.claude/settings.json
 幂等:重复运行不会重复添加(只要 command 里含 "cc_hook.py" 即视为已存在),
       并且每次都会用源码里最新的 cc_hook.py 覆盖固定副本。
 """
-import os, json, sys, shutil
+import json
+import os
+import shutil
+import sys
 
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 
@@ -26,9 +29,21 @@ STABLE_HOOK = os.path.join(STABLE_DIR, "cc_hook.py")
 # 命令带 `|| true` 兜底:文件即便丢了也不会让 CC 报错退出
 CMD = f'python3 "{STABLE_HOOK}" || true'
 
-# 这几个事件足够覆盖:开始/结束/答完/需介入/心跳
-EVENTS = ["SessionStart", "SessionEnd", "UserPromptSubmit",
-          "Stop", "StopFailure", "Notification", "PostToolUse"]
+EVENTS = (
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "Stop",
+    "StopFailure",
+    "Notification",
+    "PostToolUse",
+    "PreToolUse",
+)
+
+# 需要按工具名过滤的事件（不设 matcher 会匹配所有工具，误报太多）
+EVENT_MATCHERS = {
+    "PreToolUse": "AskUserQuestion",
+}
 
 
 def load():
@@ -65,7 +80,10 @@ def main():
         )
         if exists:
             continue
-        groups.append({"hooks": [{"type": "command", "command": CMD}]})
+        entry = {"hooks": [{"type": "command", "command": CMD}]}
+        if ev in EVENT_MATCHERS:
+            entry["matcher"] = EVENT_MATCHERS[ev]
+        groups.append(entry)
         added += 1
     with open(SETTINGS, "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
