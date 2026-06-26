@@ -259,9 +259,7 @@ def summarize_transcript_by_day(path):
             agg["cost_known"] = False
 
     for agg in by_day.values():
-        agg["total_tokens"] = (
-            agg["input"] + agg["output"] + agg["cache_write"] + agg["cache_read"]
-        )
+        agg["total_tokens"] = agg["input"] + agg["output"] + agg["cache_write"]
     _SUMMARY_CACHE[(path, "by_day")] = (
         cache_key, {day: dict(usage) for day, usage in by_day.items()}
     )
