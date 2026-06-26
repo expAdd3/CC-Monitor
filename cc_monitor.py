@@ -19,7 +19,14 @@ import time
 import glob
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import cc_pricing
+except Exception:
+    cc_pricing = None
 
 DB_DIR  = os.path.expanduser("~/.cc-monitor")
 DB_PATH = os.path.join(DB_DIR, "state.db")
@@ -63,13 +70,103 @@ def ensure_schema(conn):
         session_id TEXT PRIMARY KEY, cwd TEXT, project TEXT, status TEXT,
         last_event TEXT, last_event_ts REAL, turn_started_ts REAL,
         notify_pending INTEGER DEFAULT 0, notify_kind TEXT,
-        transcript_path TEXT, source TEXT DEFAULT 'hook'
+        transcript_path TEXT, source TEXT DEFAULT 'hook',
+        tok_input INTEGER DEFAULT 0, tok_output INTEGER DEFAULT 0,
+        tok_cache_write INTEGER DEFAULT 0, tok_cache_read INTEGER DEFAULT 0,
+        tok_total INTEGER DEFAULT 0, cost_usd REAL DEFAULT 0,
+        cost_known INTEGER DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, event TEXT, ts REAL
     );
+    CREATE TABLE IF NOT EXISTS daily_session_usage (
+        day TEXT,
+        session_id TEXT,
+        tok_input INTEGER DEFAULT 0,
+        tok_output INTEGER DEFAULT 0,
+        tok_cache_write INTEGER DEFAULT 0,
+        tok_cache_read INTEGER DEFAULT 0,
+        tok_total INTEGER DEFAULT 0,
+        cost_usd REAL DEFAULT 0,
+        cost_known INTEGER DEFAULT 1,
+        PRIMARY KEY(day, session_id)
+    );
     """)
+    for col, decl in (
+        ("tok_input", "INTEGER DEFAULT 0"), ("tok_output", "INTEGER DEFAULT 0"),
+        ("tok_cache_write", "INTEGER DEFAULT 0"), ("tok_cache_read", "INTEGER DEFAULT 0"),
+        ("tok_total", "INTEGER DEFAULT 0"), ("cost_usd", "REAL DEFAULT 0"),
+        ("cost_known", "INTEGER DEFAULT 1"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
+
+
+def today_key():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _aggregate_usage(by_day):
+    return {
+        "input": sum(d["input"] for d in by_day.values()),
+        "output": sum(d["output"] for d in by_day.values()),
+        "cache_write": sum(d["cache_write"] for d in by_day.values()),
+        "cache_read": sum(d["cache_read"] for d in by_day.values()),
+        "total_tokens": sum(d["total_tokens"] for d in by_day.values()),
+        "cost_usd": sum(d["cost_usd"] for d in by_day.values()),
+        "cost_known": all(d.get("cost_known", True) for d in by_day.values()),
+    }
+
+
+def _daily_usage_matches(conn, session_id, by_day):
+    rows = conn.execute("""
+        SELECT day, tok_input, tok_output, tok_cache_write, tok_cache_read,
+               tok_total, cost_usd, cost_known
+        FROM daily_session_usage
+        WHERE session_id=?
+    """, (session_id,)).fetchall()
+    if len(rows) != len(by_day):
+        return False
+    current = {r["day"]: r for r in rows}
+    for day, du in by_day.items():
+        r = current.get(day)
+        if not r:
+            return False
+        day_cost_known = 1 if du.get("cost_known", True) else 0
+        if (
+            r["tok_input"] != du["input"]
+            or r["tok_output"] != du["output"]
+            or r["tok_cache_write"] != du["cache_write"]
+            or r["tok_cache_read"] != du["cache_read"]
+            or r["tok_total"] != du["total_tokens"]
+            or abs((r["cost_usd"] or 0.0) - (du["cost_usd"] or 0.0)) >= 1e-12
+            or r["cost_known"] != day_cost_known
+        ):
+            return False
+    return True
+
+
+def _replace_daily_usage(conn, session_id, by_day):
+    conn.execute(
+        "DELETE FROM daily_session_usage WHERE session_id=?",
+        (session_id,),
+    )
+    for day, du in by_day.items():
+        day_cost_known = 1 if du.get("cost_known", True) else 0
+        conn.execute("""
+            INSERT INTO daily_session_usage(
+                day, session_id, tok_input, tok_output,
+                tok_cache_write, tok_cache_read, tok_total,
+                cost_usd, cost_known
+            ) VALUES(?,?,?,?,?,?,?,?,?)
+        """, (
+            day, session_id, du["input"], du["output"],
+            du["cache_write"], du["cache_read"], du["total_tokens"],
+            du["cost_usd"], day_cost_known,
+        ))
 
 
 # ========================= 日志兜底解析 =========================
@@ -176,10 +273,26 @@ def merge_log_fallback(conn):
                 continue
             status, idle = res
             notify_pending = 0  # 首次发现不通知;状态转换时由 UPDATE 子句置 1
+            u = None
+            by_day = None
+            if cc_pricing:
+                try:
+                    by_day = cc_pricing.summarize_transcript_by_day(f)
+                    u = _aggregate_usage(by_day) if by_day else None
+                except Exception:
+                    u = None
+            ti = u["input"] if u else 0
+            to = u["output"] if u else 0
+            tcw = u["cache_write"] if u else 0
+            tcr = u["cache_read"] if u else 0
+            tt = u["total_tokens"] if u else 0
+            cost = u["cost_usd"] if u else 0.0
+            ck = 1 if (u.get("cost_known", True) if u else True) else 0
             conn.execute("""
                 INSERT INTO sessions(session_id,cwd,project,status,last_event,
-                    last_event_ts,notify_pending,notify_kind,transcript_path,source)
-                VALUES(?,?,?,?,?,?,?,?,?, 'log')
+                    last_event_ts,notify_pending,notify_kind,transcript_path,source,
+                    tok_input,tok_output,tok_cache_write,tok_cache_read,tok_total,cost_usd,cost_known)
+                VALUES(?,?,?,?,?,?,?,?,?, 'log', ?,?,?,?,?,?,?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     project=excluded.project, status=excluded.status,
                     last_event_ts=excluded.last_event_ts,
@@ -189,11 +302,86 @@ def merge_log_fallback(conn):
                     notify_kind=CASE WHEN sessions.status != 'WAITING'
                                       AND excluded.status = 'WAITING'
                                       THEN 'DONE' ELSE sessions.notify_kind END,
-                    source='log'
+                    source='log',
+                    tok_input=excluded.tok_input,
+                    tok_output=excluded.tok_output,
+                    tok_cache_write=excluded.tok_cache_write,
+                    tok_cache_read=excluded.tok_cache_read,
+                    tok_total=excluded.tok_total,
+                    cost_usd=excluded.cost_usd,
+                    cost_known=excluded.cost_known
                 WHERE sessions.source!='hook'
             """, (sid, "", project, status, "log:"+status, now - idle,
-                  notify_pending, None, f))
+                  notify_pending, None, f,
+                  ti, to, tcw, tcr, tt, cost, ck))
+            if by_day is not None and not _daily_usage_matches(conn, sid, by_day):
+                _replace_daily_usage(conn, sid, by_day)
     conn.commit()
+
+
+def refresh_hook_usage(conn):
+    """后台刷新 hook 会话的 transcript 用量，避开 Stop hook 早于日志落盘的问题。"""
+    if not cc_pricing:
+        return
+    rows = conn.execute("""
+        SELECT session_id, transcript_path, tok_input, tok_output,
+               tok_cache_write, tok_cache_read, tok_total, cost_usd, cost_known
+        FROM sessions
+        WHERE source='hook'
+          AND transcript_path IS NOT NULL
+          AND transcript_path != ''
+          AND (
+              status != 'ENDED'
+              OR last_event_ts >= ?
+              OR NOT EXISTS (
+                  SELECT 1 FROM daily_session_usage
+                  WHERE daily_session_usage.session_id = sessions.session_id
+              )
+          )
+    """, (
+        time.mktime(datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0).timetuple()),
+    )).fetchall()
+    changed = False
+    for r in rows:
+        try:
+            by_day = cc_pricing.summarize_transcript_by_day(r["transcript_path"])
+        except Exception:
+            continue
+        if not by_day:   # 空的 transcript，无数据可更新
+            continue
+        u = _aggregate_usage(by_day)
+        cost_known = 1 if u.get("cost_known", True) else 0
+        if (
+            r["tok_input"] == u["input"]
+            and r["tok_output"] == u["output"]
+            and r["tok_cache_write"] == u["cache_write"]
+            and r["tok_cache_read"] == u["cache_read"]
+            and r["tok_total"] == u["total_tokens"]
+            and abs((r["cost_usd"] or 0.0) - (u["cost_usd"] or 0.0)) < 1e-12
+            and r["cost_known"] == cost_known
+            and _daily_usage_matches(conn, r["session_id"], by_day)
+        ):
+            continue
+        _replace_daily_usage(conn, r["session_id"], by_day)
+        conn.execute("""
+            UPDATE sessions SET
+                tok_input=?,
+                tok_output=?,
+                tok_cache_write=?,
+                tok_cache_read=?,
+                tok_total=?,
+                cost_usd=?,
+                cost_known=?
+            WHERE session_id=?
+        """, (
+            u["input"], u["output"], u["cache_write"], u["cache_read"],
+            u["total_tokens"], u["cost_usd"], cost_known,
+            r["session_id"],
+        ))
+        changed = True
+    if changed:
+        conn.commit()
 
 
 # ========================= 通知(唯一出口) =========================
@@ -244,8 +432,26 @@ def summarize(conn):
         idle = int(now - r["last_event_ts"])
         icon = {"RUNNING": "🟢", "WAITING": "🟡", "NEEDS_INPUT": "🔴"}.get(st, "⚪")
         tag = "hook" if r["source"] == "hook" else "log"
-        items.append(f'{icon} {r["project"]}  [{st} · {idle}s · {tag}]')
-    return counts, items
+        suffix = ""
+        if cc_pricing:
+            tt = r["tok_total"] if "tok_total" in r.keys() else 0
+            if tt:
+                suffix = f'  {cc_pricing.fmt_tokens(tt)} tok'
+        items.append(f'{icon} {r["project"]}  [{st} · {idle}s · {tag}]{suffix}')
+
+    trow = conn.execute(
+        "SELECT COALESCE(SUM(tok_total),0) tok_total, "
+        "COALESCE(SUM(cost_usd),0) cost_usd, "
+        "COALESCE(MIN(cost_known),1) cost_known "
+        "FROM daily_session_usage WHERE day=?",
+        (today_key(),)
+    ).fetchone()
+    totals = {
+        "tok_total": (trow["tok_total"] if trow else 0) or 0,
+        "cost_usd": (trow["cost_usd"] if trow else 0.0) or 0.0,
+        "cost_known": (trow["cost_known"] if trow else 1),
+    }
+    return counts, items, totals
 
 
 # ========================= 菜单栏 App =========================
@@ -302,16 +508,23 @@ def build_app():
         def tick(self, _):
             try:
                 merge_log_fallback(self.conn)
+                refresh_hook_usage(self.conn)
                 drain_notifications(self.conn)
-                counts, items = summarize(self.conn)
+                counts, items, totals = summarize(self.conn)
             except Exception:
                 self.title = " ⚠️"
                 return
             r, w, n = counts["RUNNING"], counts["WAITING"], counts["NEEDS_INPUT"]
             # 有图标时只显示数字,无图标时回退到 "CC" 前缀
             prefix = "" if icon_path else "CC "
-            self.title = f"{prefix}🟢{r} 🟡{w}" + (f" 🔴{n}" if n else "")
-            menu = [f"运行中 {r} · 待处理 {w} · 需介入 {n}", None]
+            tok_tag = ""
+            if cc_pricing and totals["tok_total"]:
+                tok_tag = f' · {cc_pricing.fmt_tokens(totals["tok_total"])}'
+            self.title = f"{prefix}🟢{r} 🟡{w}" + (f" 🔴{n}" if n else "") + tok_tag
+            head = f"运行中 {r} · 待处理 {w} · 需介入 {n}"
+            if cc_pricing and totals["tok_total"]:
+                head += f"   今日 {cc_pricing.fmt_tokens(totals['tok_total'])} tok"
+            menu = [head, None]
             menu += items if items else ["(暂无活跃会话)"]
             # 每次重建都手动补回「退出」,否则 clear() 会把它清掉
             menu += [None, rumps.MenuItem("退出 CC Monitor",
@@ -330,12 +543,16 @@ def run_cli():
     try:
         while True:
             merge_log_fallback(conn)
+            refresh_hook_usage(conn)
             drain_notifications(conn)
-            counts, items = summarize(conn)
+            counts, items, totals = summarize(conn)
             os.system("clear")
+            extra = ""
+            if cc_pricing and totals["tok_total"]:
+                extra = f"  |  今日 {cc_pricing.fmt_tokens(totals['tok_total'])} tok"
             print(f"[{datetime.now():%H:%M:%S}] "
                   f"运行中 {counts['RUNNING']} · 待处理 {counts['WAITING']} "
-                  f"· 需介入 {counts['NEEDS_INPUT']}\n")
+                  f"· 需介入 {counts['NEEDS_INPUT']}{extra}\n")
             for it in items:
                 print(" ", it)
             time.sleep(REFRESH_SEC)

@@ -42,11 +42,14 @@ def load():
 
 
 def stage_hook():
-    """把源码里的 cc_hook.py 复制到固定位置,作为 CC 真正调用的副本。"""
+    """把源码里的 cc_hook.py(及其依赖 cc_pricing.py)复制到固定位置。"""
     if not os.path.exists(SRC_HOOK):
         print(f"⚠️  找不到源 hook 脚本: {SRC_HOOK}"); sys.exit(1)
     os.makedirs(STABLE_DIR, exist_ok=True)
     shutil.copyfile(SRC_HOOK, STABLE_HOOK)
+    src_pricing = os.path.join(os.path.dirname(SRC_HOOK), "cc_pricing.py")
+    if os.path.exists(src_pricing):
+        shutil.copyfile(src_pricing, os.path.join(STABLE_DIR, "cc_pricing.py"))
     print(f"✅ 已复制 hook 到固定位置: {STABLE_HOOK}")
 
 

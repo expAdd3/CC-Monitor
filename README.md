@@ -6,14 +6,14 @@
 
 ## 它长什么样
 
-菜单栏显示汇总计数(🟢运行中 / 🟡待处理 / 🔴需介入),点开看到每个会话的状态:
+菜单栏显示汇总计数(🟢运行中 / 🟡待处理 / 🔴需介入) + 今日 token 汇总,点开看到每个会话状态与 token 用量:
 
 ```
-🟢2 🟡1
+🟢2 🟡1 · 128.4K
 ─────────────────────────
-运行中 2 · 待处理 1 · 需介入 0
-🟢 web-api            [RUNNING · 3s · hook]
-🟡 ml-train           [WAITING · 12s · hook]
+运行中 2 · 待处理 1 · 需介入 0   今日 128.4K tok
+🟢 web-api            [RUNNING · 3s · hook]  52.1K tok
+🟡 ml-train           [WAITING · 12s · hook]  76.3K tok
 🔴 infra              [NEEDS_INPUT · 5s · hook]
 退出 CC Monitor
 ```
@@ -50,6 +50,13 @@ python3 cc_monitor.py     # 常驻菜单栏
 ```
 
 > 没装 rumps 时,`cc_monitor.py` 会自动降级为终端模式(清屏刷新列表),照样能用。
+
+## Token 统计与价格说明
+
+- token 统计来自 transcript 的 `usage` 字段，支持 Anthropic/OpenAI 常见字段映射。
+- 状态库会记录会话累计 token：`tok_input/tok_output/tok_cache_write/tok_cache_read/tok_total`。
+- 成本字段为 `cost_usd`，若存在未知模型价格则标记 `cost_known=0`（表示成本不完整，但 token 计数仍准确）。
+- 可选价格覆盖文件：`~/.cc-monitor/prices.json`（示例见仓库 `prices.json.example`）。
 
 ## 打包成 .app(可选,长期使用)
 

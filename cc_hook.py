@@ -69,7 +69,14 @@ def ensure_schema(conn):
         notify_pending  INTEGER DEFAULT 0,  -- 1=有待弹通知,App 弹完置 0
         notify_kind     TEXT,               -- DONE / NEEDS_INPUT
         transcript_path TEXT,
-        source          TEXT DEFAULT 'hook'
+        source          TEXT DEFAULT 'hook',
+        tok_input       INTEGER DEFAULT 0,
+        tok_output      INTEGER DEFAULT 0,
+        tok_cache_write INTEGER DEFAULT 0,
+        tok_cache_read  INTEGER DEFAULT 0,
+        tok_total       INTEGER DEFAULT 0,
+        cost_usd        REAL DEFAULT 0,
+        cost_known      INTEGER DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS events (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +85,19 @@ def ensure_schema(conn):
         ts          REAL
     );
     """)
+    for col, decl in (
+        ("tok_input", "INTEGER DEFAULT 0"),
+        ("tok_output", "INTEGER DEFAULT 0"),
+        ("tok_cache_write", "INTEGER DEFAULT 0"),
+        ("tok_cache_read", "INTEGER DEFAULT 0"),
+        ("tok_total", "INTEGER DEFAULT 0"),
+        ("cost_usd", "REAL DEFAULT 0"),
+        ("cost_known", "INTEGER DEFAULT 1"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
 
 
 def upsert(conn, payload):
