@@ -169,11 +169,21 @@ def _iter_usage_records(path):
         return
 
 
+def _usage_key(usage):
+    u = extract_usage(usage)
+    return (u["input"], u["output"], u["cache_write"], u["cache_read"])
+
+
 def _dedup_usage_records(path):
     finalized = []
     latest_streaming = None
+    prev_key = None
     for rec in _iter_usage_records(path):
         if rec["final"]:
+            key = _usage_key(rec["usage"])
+            if key == prev_key:   # CC 会把每条 usage 写两遍 transcript
+                continue
+            prev_key = key
             finalized.append(rec)
             latest_streaming = None
         else:
@@ -214,9 +224,7 @@ def summarize_transcript(path):
     if not saw_any:
         agg["cost_known"] = True
 
-    agg["total_tokens"] = (
-        agg["input"] + agg["output"] + agg["cache_write"] + agg["cache_read"]
-    )
+    agg["total_tokens"] = agg["input"] + agg["output"] + agg["cache_write"]
     _SUMMARY_CACHE[path] = (cache_key, dict(agg))
     return agg
 
