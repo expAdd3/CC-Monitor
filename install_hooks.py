@@ -26,9 +26,14 @@ STABLE_HOOK = os.path.join(STABLE_DIR, "cc_hook.py")
 # 命令带 `|| true` 兜底:文件即便丢了也不会让 CC 报错退出
 CMD = f'python3 "{STABLE_HOOK}" || true'
 
-# 这几个事件足够覆盖:开始/结束/答完/需介入/心跳
+# 这几个事件足够覆盖:开始/结束/答完/需介入/心跳/AskUserQuestion
 EVENTS = ["SessionStart", "SessionEnd", "UserPromptSubmit",
-          "Stop", "StopFailure", "Notification", "PostToolUse"]
+          "Stop", "StopFailure", "Notification", "PostToolUse", "PreToolUse"]
+
+# 仅对 AskUserQuestion 的 PreToolUse 触发，避免普通工具调用噪音
+EVENT_MATCHERS = {
+    "PreToolUse": "AskUserQuestion",
+}
 
 
 def load():
@@ -42,11 +47,14 @@ def load():
 
 
 def stage_hook():
-    """把源码里的 cc_hook.py 复制到固定位置,作为 CC 真正调用的副本。"""
+    """把源码里的 cc_hook.py(及其依赖 cc_pricing.py)复制到固定位置。"""
     if not os.path.exists(SRC_HOOK):
         print(f"⚠️  找不到源 hook 脚本: {SRC_HOOK}"); sys.exit(1)
     os.makedirs(STABLE_DIR, exist_ok=True)
     shutil.copyfile(SRC_HOOK, STABLE_HOOK)
+    src_pricing = os.path.join(os.path.dirname(SRC_HOOK), "cc_pricing.py")
+    if os.path.exists(src_pricing):
+        shutil.copyfile(src_pricing, os.path.join(STABLE_DIR, "cc_pricing.py"))
     print(f"✅ 已复制 hook 到固定位置: {STABLE_HOOK}")
 
 
@@ -65,7 +73,11 @@ def main():
         )
         if exists:
             continue
-        groups.append({"hooks": [{"type": "command", "command": CMD}]})
+        entry = {"hooks": [{"type": "command", "command": CMD}]}
+        matcher = EVENT_MATCHERS.get(ev)
+        if matcher:
+            entry["matcher"] = matcher
+        groups.append(entry)
         added += 1
     with open(SETTINGS, "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)

@@ -1,0 +1,36 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 闹钟主体 - 圆形 -->
+  <circle cx="512" cy="544" r="320" fill="url(#alarmGradient)"/>
+  
+  <!-- 闹钟顶部铃铛 -->
+  <path d="M320 288 L256 192 L352 224 Z" fill="url(#bellGradient)"/>
+  <path d="M704 288 L768 192 L672 224 Z" fill="url(#bellGradient)"/>
+  <rect x="448" y="224" width="128" height="64" rx="32" fill="url(#bellGradient)"/>
+  
+  <!-- 闹钟底部支架 -->
+  <rect x="416" y="832" width="192" height="48" rx="24" fill="url(#bellGradient)"/>
+  
+  <!-- 内部：终端提示符 > 象征 CLI -->
+  <path d="M352 480 L480 576 L352 672" 
+        stroke="white" 
+        stroke-width="64" 
+        stroke-linecap="round" 
+        stroke-linejoin="round"
+        fill="none"/>
+  
+  <!-- 内部：脉冲点 象征监控/告警 -->
+  <circle cx="640" cy="576" r="48" fill="white"/>
+  <circle cx="640" cy="576" r="80" fill="white" fill-opacity="0.3"/>
+  
+  <!-- 渐变定义 -->
+  <defs>
+    <linearGradient id="alarmGradient" x1="192" y1="224" x2="832" y2="864" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFB347"/>
+      <stop offset="1" stop-color="#FF6B35"/>
+    </linearGradient>
+    <linearGradient id="bellGradient" x1="256" y1="192" x2="768" y2="288" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF8C42"/>
+      <stop offset="1" stop-color="#FF6B35"/>
+    </linearGradient>
+  </defs>
+</svg>

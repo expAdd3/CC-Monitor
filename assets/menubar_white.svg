@@ -1,0 +1,29 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 遮罩：白色保留，黑色镂空 -->
+    <mask id="detailMask">
+      <rect width="1024" height="1024" fill="white"/>
+      <!-- 终端提示符 > 镂空 -->
+      <path d="M352 480 L480 576 L352 672" 
+            stroke="black" 
+            stroke-width="64" 
+            stroke-linecap="round" 
+            stroke-linejoin="round"
+            fill="none"/>
+      <!-- 脉冲点镂空 -->
+      <circle cx="640" cy="576" r="48" fill="black"/>
+    </mask>
+  </defs>
+  
+  <!-- 白色实心图标，内部镂空透明 -->
+  <g mask="url(#detailMask)" fill="white">
+    <!-- 闹钟主体圆形 -->
+    <circle cx="512" cy="544" r="320"/>
+    <!-- 顶部铃铛 -->
+    <path d="M320 288 L256 192 L352 224 Z"/>
+    <path d="M704 288 L768 192 L672 224 Z"/>
+    <rect x="448" y="224" width="128" height="64" rx="32"/>
+    <!-- 底部支架 -->
+    <rect x="416" y="832" width="192" height="48" rx="24"/>
+  </g>
+</svg>
