@@ -14,7 +14,7 @@ cc_hook.py —— Claude Code Hook 上报端(确定性事件源)
 
 注册方式(写入 ~/.claude/settings.json,见文末 SETTINGS_SNIPPET):
   对 Stop / Notification / SessionStart / SessionEnd / UserPromptSubmit /
-  PostToolUse 这几个事件各挂一条:
+  PostToolUse / PreToolUse(AskUserQuestion matcher) 这些事件各挂一条:
       python3 /绝对路径/cc_hook.py
 """
 
@@ -23,6 +23,7 @@ import os
 import json
 import time
 import sqlite3
+import subprocess
 
 DB_DIR = os.path.expanduser("~/.cc-monitor")
 DB_PATH = os.path.join(DB_DIR, "state.db")
@@ -47,6 +48,36 @@ EVENT_TO_STATUS = {
 NOTIFY_STATES = {"WAITING", "NEEDS_INPUT"}
 
 
+def _bundle_id_from_env():
+    tp = (os.environ.get("TERM_PROGRAM") or "").strip().lower()
+    if tp in ("iterm.app", "iterm2"):
+        return "com.googlecode.iterm2"
+    if tp in ("apple_terminal", "terminal.app"):
+        return "com.apple.Terminal"
+    if tp in ("vscode",):
+        return "com.microsoft.VSCode"
+    if tp in ("warpterminal", "warp"):
+        return "dev.warp.Warp-Stable"
+    return ""
+
+
+def _frontmost_bundle_id():
+    bid = _bundle_id_from_env()
+    if bid:
+        return bid
+    try:
+        cp = subprocess.run([
+            "osascript", "-e",
+            'tell application "System Events" to get bundle identifier of first process whose frontmost is true'
+        ], check=False, capture_output=True, text=True)
+        out = (cp.stdout or "").strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    return ""
+
+
 def connect():
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -69,7 +100,15 @@ def ensure_schema(conn):
         notify_pending  INTEGER DEFAULT 0,  -- 1=有待弹通知,App 弹完置 0
         notify_kind     TEXT,               -- DONE / NEEDS_INPUT
         transcript_path TEXT,
-        source          TEXT DEFAULT 'hook'
+        client_bundle_id TEXT,
+        source          TEXT DEFAULT 'hook',
+        tok_input       INTEGER DEFAULT 0,
+        tok_output      INTEGER DEFAULT 0,
+        tok_cache_write INTEGER DEFAULT 0,
+        tok_cache_read  INTEGER DEFAULT 0,
+        tok_total       INTEGER DEFAULT 0,
+        cost_usd        REAL DEFAULT 0,
+        cost_known      INTEGER DEFAULT 1
     );
     CREATE TABLE IF NOT EXISTS events (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +117,36 @@ def ensure_schema(conn):
         ts          REAL
     );
     """)
+    for col, decl in (
+        ("client_bundle_id", "TEXT"),
+        ("tok_input", "INTEGER DEFAULT 0"),
+        ("tok_output", "INTEGER DEFAULT 0"),
+        ("tok_cache_write", "INTEGER DEFAULT 0"),
+        ("tok_cache_read", "INTEGER DEFAULT 0"),
+        ("tok_total", "INTEGER DEFAULT 0"),
+        ("cost_usd", "REAL DEFAULT 0"),
+        ("cost_known", "INTEGER DEFAULT 1"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {decl}")
+        except sqlite3.OperationalError:
+            pass
+
+
+def is_ask_user_question(payload):
+    return (
+        payload.get("hook_event_name") == "PreToolUse"
+        and payload.get("tool_name") == "AskUserQuestion"
+    )
+
+
+def get_previous_session(conn, sid):
+    row = conn.execute(
+        "SELECT status, last_event, turn_started_ts FROM sessions WHERE session_id=?", (sid,)
+    ).fetchone()
+    if not row:
+        return None, None, None
+    return row[0], row[1], row[2]
 
 
 def upsert(conn, payload):
@@ -86,33 +155,44 @@ def upsert(conn, payload):
     cwd   = payload.get("cwd") or ""
     tpath = payload.get("transcript_path") or ""
     project = os.path.basename(cwd.rstrip("/")) if cwd else "(unknown)"
+    client_bundle_id = payload.get("app_bundle_id") or payload.get("client_bundle_id") or ""
+    if not client_bundle_id:
+        client_bundle_id = _frontmost_bundle_id()
     now = time.time()
 
-    status = EVENT_TO_STATUS.get(event, "RUNNING")
+    prev_status, prev_event, prev_turn_started = get_previous_session(conn, sid)
+    ask_user_question = is_ask_user_question(payload)
 
-    # 通知种类: Stop/StopFailure → DONE; Notification → NEEDS_INPUT
+    status = EVENT_TO_STATUS.get(event, "RUNNING")
+    if ask_user_question:
+        status = "NEEDS_INPUT"
+
+    # 通知种类: Stop/StopFailure → DONE; Notification/AskUserQuestion → NEEDS_INPUT
     # 基于事件而非派生状态，避免 SessionStart 也触发 DONE 通知
     notify_kind = None
     notify_pending = 0
     if event in ("Stop", "StopFailure"):
-        notify_kind, notify_pending = "DONE", 1
+        if prev_status == "NEEDS_INPUT" and prev_event == "PreToolUse":
+            status = "NEEDS_INPUT"
+        else:
+            notify_kind, notify_pending = "DONE", 1
     elif event == "Notification":
+        if prev_status != "NEEDS_INPUT":
+            notify_kind, notify_pending = "NEEDS_INPUT", 1
+    elif ask_user_question:
         notify_kind, notify_pending = "NEEDS_INPUT", 1
 
-    # turn_started_ts:开始新一轮时记一次,用于算"这轮跑了多久"
-    turn_started = now if event == "UserPromptSubmit" else None
+    if event == "UserPromptSubmit":
+        conn.execute("UPDATE sessions SET notify_pending=0 WHERE session_id=?", (sid,))
 
-    row = conn.execute(
-        "SELECT turn_started_ts FROM sessions WHERE session_id=?", (sid,)
-    ).fetchone()
-    if row and turn_started is None:
-        turn_started = row[0]
+    # turn_started_ts:开始新一轮时记一次,用于算"这轮跑了多久"
+    turn_started = now if event == "UserPromptSubmit" else prev_turn_started
 
     conn.execute("""
         INSERT INTO sessions
             (session_id, cwd, project, status, last_event, last_event_ts,
-             turn_started_ts, notify_pending, notify_kind, transcript_path, source)
-        VALUES (?,?,?,?,?,?,?,?,?,?, 'hook')
+             turn_started_ts, notify_pending, notify_kind, transcript_path, client_bundle_id, source)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?, 'hook')
         ON CONFLICT(session_id) DO UPDATE SET
             cwd=excluded.cwd,
             project=excluded.project,
@@ -125,9 +205,11 @@ def upsert(conn, payload):
             notify_kind=CASE WHEN excluded.notify_pending=1
                              THEN excluded.notify_kind ELSE sessions.notify_kind END,
             transcript_path=excluded.transcript_path,
+            client_bundle_id=CASE WHEN excluded.client_bundle_id != ''
+                                  THEN excluded.client_bundle_id ELSE sessions.client_bundle_id END,
             source='hook'
     """, (sid, cwd, project, status, event, now,
-          turn_started, notify_pending, notify_kind, tpath))
+          turn_started, notify_pending, notify_kind, tpath, client_bundle_id))
 
     conn.execute("INSERT INTO events(session_id,event,ts) VALUES(?,?,?)",
                  (sid, event, now))

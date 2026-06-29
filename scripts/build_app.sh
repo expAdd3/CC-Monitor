@@ -69,14 +69,32 @@ if [ ! -f assets/AppIcon.icns ] && [ -f assets/icon_src.jpeg ]; then
 fi
 
 echo "==> [4/4] 打包"
-rm -rf build dist
-python setup.py py2app
+rm -rf build
+
+BASE_APP="dist/CCMonitor.app"
+OUT_APP="$BASE_APP"
+if [ -e "$BASE_APP" ]; then
+  i=2
+  while [ -e "dist/CCMonitor-v${i}.app" ]; do
+    i=$((i + 1))
+  done
+  OUT_APP="dist/CCMonitor-v${i}.app"
+  echo "   检测到已存在 dist/CCMonitor.app，新产物将输出为: $OUT_APP"
+fi
+
+TMP_DIST=".dist-tmp"
+rm -rf "$TMP_DIST"
+python setup.py py2app --dist-dir "$TMP_DIST"
+
+mkdir -p dist
+mv "$TMP_DIST/CCMonitor.app" "$OUT_APP"
+rm -rf "$TMP_DIST"
 
 echo "==> [收尾] 修复可能缺失的 libffi(conda 环境保险)"
-[ -f scripts/fix_libffi.sh ] && bash scripts/fix_libffi.sh dist/CCMonitor.app || true
+[ -f scripts/fix_libffi.sh ] && bash scripts/fix_libffi.sh "$OUT_APP" || true
 
 echo ""
-echo "✅ 完成!产物在:  dist/CCMonitor.app"
+echo "✅ 完成!产物在:  $OUT_APP"
 echo "   把它拖进 /Applications,双击即可常驻菜单栏。"
 echo ""
 echo "别忘了注册 hook(让监控变准):"
