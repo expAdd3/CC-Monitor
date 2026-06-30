@@ -29,6 +29,16 @@ try:
 except Exception:
     cc_pricing = None
 
+try:
+    import install_hooks
+except Exception:
+    install_hooks = None
+
+try:
+    import uninstall
+except Exception:
+    uninstall = None
+
 DB_DIR  = os.path.expanduser("~/.cc-monitor")
 DB_PATH = os.path.join(DB_DIR, "state.db")
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
@@ -92,7 +102,11 @@ def ensure_schema(conn):
         cost_known INTEGER DEFAULT 1,
         PRIMARY KEY(day, session_id)
     );
-    """)
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    """ )
     for col, decl in (
         ("client_bundle_id", "TEXT"),
         ("tok_input", "INTEGER DEFAULT 0"), ("tok_output", "INTEGER DEFAULT 0"),
@@ -105,6 +119,29 @@ def ensure_schema(conn):
         except sqlite3.OperationalError:
             pass
     conn.commit()
+
+
+def get_setting(conn, key, default=None):
+    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    if not row:
+        return default
+    return row["value"]
+
+
+def set_setting(conn, key, value):
+    conn.execute(
+        "INSERT INTO app_settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, str(value)),
+    )
+    conn.commit()
+
+
+def get_setting_bool(conn, key, default=False):
+    v = get_setting(conn, key, None)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
 def today_key():
@@ -654,6 +691,38 @@ def build_app():
                     return p
         return None
 
+    def _menu_symbol_image(symbol_name, box=18.0, pt=15.0):
+        """把 SF Symbol 居中绘进固定 box×box 画布,保证菜单图标等宽对齐。"""
+        try:
+            from AppKit import NSImage, NSImageSymbolConfiguration
+            from Foundation import NSMakeRect
+
+            base = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                symbol_name, None
+            )
+            if base is None:
+                return None
+            try:
+                cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(pt, 0.0)
+                base = base.imageWithSymbolConfiguration_(cfg)
+            except Exception:
+                pass
+
+            canvas = NSImage.alloc().initWithSize_((box, box))
+            canvas.lockFocus()
+            sz = base.size()
+            x = (box - sz.width) / 2.0
+            y = (box - sz.height) / 2.0
+            base.drawInRect_fromRect_operation_fraction_(
+                NSMakeRect(x, y, sz.width, sz.height),
+                NSMakeRect(0.0, 0.0, 0.0, 0.0), 2, 1.0
+            )
+            canvas.unlockFocus()
+            canvas.setTemplate_(True)
+            return canvas
+        except Exception:
+            return None
+
     icon_path = _resolve_menubar_icon_path()
     icon_ns = _load_icon(icon_path) if icon_path else None
 
@@ -666,6 +735,7 @@ def build_app():
             self._last_status_render = None
             self.conn = connect()
             ensure_schema(self.conn)
+            self.icon_only = get_setting_bool(self.conn, "ui.menubar_icon_only", False)
             self.timer = rumps.Timer(self.tick, REFRESH_SEC)
             self.timer.start()
 
@@ -707,7 +777,7 @@ def build_app():
                 from Foundation import NSString, NSMakePoint, NSMakeRect
 
                 H = 22.0                  # 菜单栏标题高度
-                ICON_W = 18.0             # 图标绘制尺寸(留出上下边距)
+                ICON_W = 22.0             # 图标绘制尺寸(再放大一点)
                 GAP = 5.0                 # 各区块水平间距
                 DOT_R = 2.0               # 圆点半径
                 DOT_NUM_GAP = 2.0         # 圆点与数字间距
@@ -793,6 +863,336 @@ def build_app():
             except Exception:
                 return False
 
+        def _set_icon_only(self, enabled):
+            self.icon_only = bool(enabled)
+            set_setting(self.conn, "ui.menubar_icon_only", "1" if self.icon_only else "0")
+            self._last_status_render = None
+
+        def _render_icon_only(self):
+            if not icon_path:
+                self.title = "CC"
+                return
+            btn = self._status_button()
+            if btn is None:
+                self.title = ""
+                return
+            try:
+                from AppKit import NSImageOnly
+                if icon_ns is not None:
+                    btn.setImage_(icon_ns)
+                btn.setImagePosition_(NSImageOnly)
+                btn.setTitle_("")
+            except Exception:
+                self.title = ""
+
+        @staticmethod
+        def _run_action_safely(action, success_msg):
+            try:
+                action()
+                return True, success_msg
+            except SystemExit as e:
+                code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+                if code == 0:
+                    return True, success_msg
+                return False, f"操作失败（退出码 {code}）"
+            except Exception as e:
+                return False, f"操作失败：{e}"
+
+        @staticmethod
+        def _find_runtime_file(name):
+            here = os.path.dirname(os.path.abspath(__file__))
+            cands = [
+                os.path.join(here, name),
+                os.path.join(here, "..", "Resources", name),
+            ]
+            if getattr(sys, "frozen", False):
+                exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+                cands.extend([
+                    os.path.join(exe_dir, "..", "Resources", name),
+                    os.path.join(exe_dir, "Resources", name),
+                ])
+            for p in cands:
+                if os.path.exists(p):
+                    return p
+            return None
+
+        @staticmethod
+        def _configure_hook_fallback():
+            settings = os.path.expanduser("~/.claude/settings.json")
+            stable_dir = os.path.expanduser("~/.cc-monitor")
+            stable_hook = os.path.join(stable_dir, "cc_hook.py")
+            src_hook = CCMonitor._find_runtime_file("cc_hook.py")
+            if not src_hook:
+                raise RuntimeError("未找到 cc_hook.py 资源，无法配置 Hook")
+
+            os.makedirs(stable_dir, exist_ok=True)
+            shutil.copyfile(src_hook, stable_hook)
+
+            src_pricing = CCMonitor._find_runtime_file("cc_pricing.py")
+            if src_pricing:
+                shutil.copyfile(src_pricing, os.path.join(stable_dir, "cc_pricing.py"))
+
+            cmd = f'python3 "{stable_hook}" || true'
+            events = [
+                "SessionStart", "SessionEnd", "UserPromptSubmit",
+                "Stop", "StopFailure", "Notification", "PostToolUse", "PreToolUse",
+            ]
+            matchers = {"PreToolUse": "AskUserQuestion"}
+
+            os.makedirs(os.path.dirname(settings), exist_ok=True)
+            cfg = {}
+            if os.path.exists(settings):
+                with open(settings, encoding="utf-8") as f:
+                    cfg = json.load(f)
+
+            hooks = cfg.setdefault("hooks", {})
+            for ev in events:
+                groups = hooks.setdefault(ev, [])
+                exists = any(
+                    "cc_hook.py" in h.get("command", "")
+                    for g in groups for h in g.get("hooks", [])
+                )
+                if exists:
+                    continue
+                entry = {"hooks": [{"type": "command", "command": cmd}]}
+                if ev in matchers:
+                    entry["matcher"] = matchers[ev]
+                groups.append(entry)
+
+            with open(settings, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+        @staticmethod
+        def _configure_hook():
+            if install_hooks is not None:
+                try:
+                    install_hooks.main()
+                    return
+                except SystemExit as e:
+                    code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+                    if code == 0:
+                        return
+                except Exception:
+                    pass
+            CCMonitor._configure_hook_fallback()
+
+        @staticmethod
+        def _remove_hook_only_fallback():
+            settings = os.path.expanduser("~/.claude/settings.json")
+            if not os.path.exists(settings):
+                return
+            with open(settings, encoding="utf-8") as f:
+                cfg = json.load(f)
+
+            hooks = cfg.get("hooks", {})
+            for ev in list(hooks.keys()):
+                new_groups = []
+                for g in hooks[ev]:
+                    kept = [
+                        h for h in g.get("hooks", [])
+                        if "cc_hook.py" not in h.get("command", "")
+                    ]
+                    if kept:
+                        g["hooks"] = kept
+                        new_groups.append(g)
+                if new_groups:
+                    hooks[ev] = new_groups
+                else:
+                    del hooks[ev]
+            if not hooks:
+                cfg.pop("hooks", None)
+
+            with open(settings, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+        @staticmethod
+        def _remove_hook_only():
+            if uninstall is not None:
+                uninstall.clean_hooks()
+                return
+            CCMonitor._remove_hook_only_fallback()
+
+        def _show_settings_alert(self, title, message):
+            from AppKit import NSAlert
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(title)
+            alert.setInformativeText_(message)
+            alert.addButtonWithTitle_("好")
+            alert.runModal()
+
+        def _ensure_settings_window(self):
+            if getattr(self, "_settings_window", None) is not None:
+                self._settings_toggle.setState_(1 if self.icon_only else 0)
+                return
+
+            from AppKit import (
+                NSWindow,
+                NSWindowStyleMaskTitled,
+                NSWindowStyleMaskClosable,
+                NSWindowStyleMaskMiniaturizable,
+                NSBackingStoreBuffered,
+                NSButton, NSSwitch, NSTextField, NSView,
+                NSImage, NSImageView,
+                NSColor, NSFont,
+                NSTextAlignmentCenter
+            )
+            from Foundation import NSMakeRect
+
+            # ── 语义常量(替代裸魔法数字)────────────────────────────
+            ALIGN_CENTER  = NSTextAlignmentCenter   # NSTextAlignmentCenter
+            BEZEL_ROUNDED = 1   # NSBezelStyleRounded
+            SIZE_LARGE    = 3   # NSControlSizeLarge
+
+            WIN_W, WIN_H = 460, 372
+            MARGIN = 24
+            CARD_W = WIN_W - MARGIN * 2
+
+            # 设置窗口固定大小,去掉 resizable
+            style = (
+                NSWindowStyleMaskTitled
+                | NSWindowStyleMaskClosable
+                | NSWindowStyleMaskMiniaturizable
+            )
+            win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, WIN_W, WIN_H), style, NSBackingStoreBuffered, False,
+            )
+            win.setTitle_("CC Monitor 设置")
+            win.setReleasedWhenClosed_(False)
+            content = win.contentView()
+
+            # ── 顶部:应用图标 + 主标题 + 副标题 ─────────────────────
+            icon_size = 72
+            icon_view = NSImageView.alloc().initWithFrame_(
+                NSMakeRect((WIN_W - icon_size) / 2, WIN_H - 24 - icon_size,
+                           icon_size, icon_size))
+            icon_file = self._find_runtime_file("AppIcon.icns")
+            if icon_file:
+                icon_img = NSImage.alloc().initWithContentsOfFile_(icon_file)
+                if icon_img is not None:
+                    icon_view.setImage_(icon_img)
+            content.addSubview_(icon_view)
+
+            title = NSTextField.labelWithString_("CC Monitor")
+            title.setFrame_(NSMakeRect(MARGIN, WIN_H - 124, CARD_W, 26))
+            title.setFont_(NSFont.boldSystemFontOfSize_(18))
+            title.setAlignment_(ALIGN_CENTER)
+            content.addSubview_(title)
+
+            subtitle = NSTextField.labelWithString_("多会话监控 · 设置")
+            subtitle.setFrame_(NSMakeRect(MARGIN, WIN_H - 146, CARD_W, 18))
+            subtitle.setFont_(NSFont.systemFontOfSize_(12))
+            subtitle.setTextColor_(NSColor.secondaryLabelColor())
+            subtitle.setAlignment_(ALIGN_CENTER)
+            content.addSubview_(subtitle)
+
+            # ── 卡片:菜单栏显示设置 ────────────────────────────────
+            card_h = 76
+            card_y = WIN_H - 146 - 20 - card_h
+            card = NSView.alloc().initWithFrame_(
+                NSMakeRect(MARGIN, card_y, CARD_W, card_h))
+            card.setWantsLayer_(True)
+            try:
+                layer = card.layer()
+                layer.setCornerRadius_(10.0)
+                layer.setBackgroundColor_(NSColor.controlBackgroundColor().CGColor())
+                layer.setBorderWidth_(1.0)
+                layer.setBorderColor_(NSColor.separatorColor().CGColor())
+            except Exception:
+                pass
+            content.addSubview_(card)
+
+            # 左侧:标题 + 灰色描述;右侧:开关右对齐,中间留白自然撑开
+            row_title = NSTextField.labelWithString_("仅显示图标")
+            row_title.setFrame_(NSMakeRect(18, card_h - 18 - 18, 260, 18))
+            row_title.setFont_(NSFont.systemFontOfSize_(13))
+            card.addSubview_(row_title)
+
+            row_desc = NSTextField.labelWithString_("隐藏状态数字与 token,仅保留菜单栏图标")
+            row_desc.setFrame_(NSMakeRect(18, 14, 300, 16))
+            row_desc.setFont_(NSFont.systemFontOfSize_(11))
+            row_desc.setTextColor_(NSColor.secondaryLabelColor())
+            card.addSubview_(row_desc)
+
+            sw_w, sw_h = 42, 24
+            toggle = NSSwitch.alloc().initWithFrame_(
+                NSMakeRect(CARD_W - 18 - sw_w, (card_h - sw_h) / 2, sw_w, sw_h))
+            toggle.setState_(1 if self.icon_only else 0)
+            toggle.setTarget_(self)
+            toggle.setAction_("_settings_action_toggle:")
+            card.addSubview_(toggle)
+
+            # ── 分区小标题:HOOK ───────────────────────────────────
+            sec = NSTextField.labelWithString_("HOOK 配置")
+            sec.setFrame_(NSMakeRect(MARGIN + 2, card_y - 34, CARD_W, 16))
+            sec.setFont_(NSFont.boldSystemFontOfSize_(11))
+            sec.setTextColor_(NSColor.secondaryLabelColor())
+            content.addSubview_(sec)
+
+            # ── 两个按钮:主操作(蓝色默认键) + 危险操作 ─────────────
+            btn_h, btn_gap = 36, 16
+            btn_w = (CARD_W - btn_gap) / 2
+            btn_y = card_y - 34 - 18 - btn_h
+
+            btn_install = NSButton.alloc().initWithFrame_(
+                NSMakeRect(MARGIN, btn_y, btn_w, btn_h))
+            btn_install.setBezelStyle_(BEZEL_ROUNDED)
+            btn_install.setControlSize_(SIZE_LARGE)
+            btn_install.setTitle_("一键配置 Hook")
+            btn_install.setKeyEquivalent_("\r")            # 蓝色默认按钮
+            btn_install.setTarget_(self)
+            btn_install.setAction_("_settings_action_configure:")
+            content.addSubview_(btn_install)
+
+            btn_remove = NSButton.alloc().initWithFrame_(
+                NSMakeRect(MARGIN + btn_w + btn_gap, btn_y, btn_w, btn_h))
+            btn_remove.setBezelStyle_(BEZEL_ROUNDED)
+            btn_remove.setControlSize_(SIZE_LARGE)
+            btn_remove.setTitle_("一键移除 Hook")
+            try:
+                btn_remove.setHasDestructiveAction_(True)  # 系统渲染为危险样式
+            except Exception:
+                pass
+            btn_remove.setTarget_(self)
+            btn_remove.setAction_("_settings_action_remove:")
+            content.addSubview_(btn_remove)
+
+            self._settings_window = win
+            self._settings_toggle = toggle
+        
+        def _settings_action_toggle_(self, _sender):
+            self._set_icon_only(self._settings_toggle.state() == 1)
+
+        def _confirm_action(self, title, message):
+            from AppKit import NSAlert
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(title)
+            alert.setInformativeText_(message)
+            alert.addButtonWithTitle_("确认")
+            alert.addButtonWithTitle_("取消")
+            return alert.runModal() == 1000
+
+        def _settings_action_configure_(self, _sender):
+            if not self._confirm_action("确认配置 Hook？", "将把 Hook 写入 ~/.claude/settings.json"):
+                return
+            ok, msg = self._run_action_safely(self._configure_hook, "Hook 已配置")
+            self._show_settings_alert("配置结果", ("✅ " if ok else "❌ ") + msg)
+
+        def _settings_action_remove_(self, _sender):
+            if not self._confirm_action("确认移除 Hook？", "将仅移除 settings.json 中的 cc_hook 项"):
+                return
+            ok, msg = self._run_action_safely(self._remove_hook_only, "Hook 已移除")
+            self._show_settings_alert("移除结果", ("✅ " if ok else "❌ ") + msg)
+
+        def open_settings(self, _):
+            try:
+                self._ensure_settings_window()
+                self._settings_window.center()
+                self._settings_window.makeKeyAndOrderFront_(None)
+                from AppKit import NSApp
+                NSApp.activateIgnoringOtherApps_(True)
+            except Exception as e:
+                rumps.alert("设置", f"打开设置窗口失败：{e}")
+
         def cleanup_quit(self, _):
             """关闭数据库连接后再退出。"""
             try:
@@ -816,8 +1216,11 @@ def build_app():
             tok_tag = ""
             if cc_pricing and totals["tok_total"]:
                 tok_tag = f' · {cc_pricing.fmt_tokens(totals["tok_total"])}'
+            # 仅图标模式:隐藏状态数字与 token
+            if self.icon_only:
+                self._render_icon_only()
             # 竖向彩色点+数字;失败时回退到单行
-            if not self._apply_vertical_colored_dots(r, w, n, tok_tag):
+            elif not self._apply_vertical_colored_dots(r, w, n, tok_tag):
                 self.title = f"{prefix}●{r} ●{w} ●{n}" + tok_tag
             head = f"运行中 {r} · 待处理 {w} · 需介入 {n}"
             if cc_pricing and totals["tok_total"]:
@@ -862,9 +1265,19 @@ def build_app():
                             parent.add("(暂无模型用量明细)")
                     menu.append(parent)
 
-            # 每次重建都手动补回「退出」,否则 clear() 会把它清掉
-            menu += [None, rumps.MenuItem("退出 CC Monitor",
-                                          callback=self.cleanup_quit)]
+            # 每次重建都手动补回「设置/退出」,否则 clear() 会把它清掉
+            set_item = rumps.MenuItem("设置", callback=self.open_settings)
+            quit_item = rumps.MenuItem("退出", callback=self.cleanup_quit)
+            gear_img = _menu_symbol_image("gearshape", box=18.0, pt=13.0)
+            power_img = _menu_symbol_image("power", box=18.0, pt=13.0)
+            try:
+                if gear_img is not None:
+                    set_item._menuitem.setImage_(gear_img)
+                if power_img is not None:
+                    quit_item._menuitem.setImage_(power_img)
+            except Exception:
+                pass
+            menu += [None, set_item, quit_item]
             self.menu.clear()
             self.menu = menu
 
