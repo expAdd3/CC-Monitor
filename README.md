@@ -2,14 +2,23 @@
   <img src="assets/app_icon_color.svg" alt="CC Monitor logo" width="160" height="160" />
   <h1>CC Monitor</h1>
   <p>macOS 菜单栏里的 Claude Code 多会话状态与 Token 监控工具</p>
-</div>
 
-<p align="center">
-  <code>platform: macOS</code>
-  <code>python: 3.x</code>
-  <code>ui: rumps</code>
-  <code>storage: SQLite</code>
-</p>
+  <p>
+    <a href="https://github.com/expAdd3/CC-Monitor/stargazers">
+      <img src="https://img.shields.io/github/stars/expAdd3/CC-Monitor?style=for-the-badge" alt="GitHub Stars" />
+    </a>
+    <a href="https://github.com/expAdd3/CC-Monitor/releases">
+      <img src="https://img.shields.io/github/v/release/expAdd3/CC-Monitor?style=for-the-badge" alt="Latest Release" />
+    </a>
+    <a href="https://github.com/expAdd3/CC-Monitor/blob/main/LICENSE">
+      <img src="https://img.shields.io/github/license/expAdd3/CC-Monitor?style=for-the-badge" alt="License" />
+    </a>
+    <img src="https://img.shields.io/badge/macOS-12%2B-black?style=for-the-badge&logo=apple" alt="macOS" />
+    <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+    <img src="https://img.shields.io/badge/UI-rumps-4B8BBE?style=for-the-badge" alt="rumps" />
+    <img src="https://img.shields.io/badge/Storage-SQLite-003B57?style=for-the-badge&logo=sqlite" alt="SQLite" />
+  </p>
+</div>
 
 <div align="center">
   <img src="assets/image-1.png" alt="CC Monitor menubar screenshot" />
@@ -115,7 +124,11 @@ python3 cc_monitor.py
 ./scripts/build_app.sh
 ```
 
-产物：`dist/CCMonitor.app`
+产物：
+
+```text
+dist/CCMonitor.app
+```
 
 > 建议使用脚本默认选择的非 conda Python 环境打包，避免动态库问题。
 
@@ -134,7 +147,7 @@ pkill -f cc_monitor
 ## Project Structure
 
 | File | Purpose |
-|---|---|
+|------|---------|
 | `cc_monitor.py` | 菜单栏主程序：聚合、展示、通知与兜底逻辑 |
 | `cc_hook.py` | Hook 写库端：接收事件并更新会话状态 |
 | `cc_pricing.py` | Token 解析、去重、计费聚合 |
@@ -160,11 +173,16 @@ python3 - <<'EOF'
 import os, json, shutil, time
 p = os.path.expanduser("~/.claude/settings.json")
 if not os.path.exists(p):
-    print("settings.json 不存在,无需处理"); raise SystemExit
+    print("settings.json 不存在，无需处理")
+    raise SystemExit
+
 shutil.copy(p, p + f".bak.{int(time.time())}")
+
 cfg = json.load(open(p))
 cfg.pop("hooks", None)
+
 json.dump(cfg, open(p, "w"), indent=2, ensure_ascii=False)
+
 print("✅ 已清空 hooks（已备份）")
 EOF
 ```
@@ -173,15 +191,16 @@ EOF
 
 ## Screenshots
 
-**Menubar**
+### Menubar
 
 ![menubar](assets/demo-menubar.jpg)
 
-**Notification**
+### Notification
 
 ![notification](assets/image.png)
 
-**Token**
-![notification](assets/image-2.png)
----
-![notification](assets/image-3.png)
+### Token
+
+![token](assets/image-2.png)
+
+![token-detail](assets/image-3.png)
