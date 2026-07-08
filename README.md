@@ -1,206 +1,462 @@
 <div align="center">
-  <img src="assets/app_icon_color.svg" alt="CC Monitor logo" width="160" height="160" />
-  <h1>CC Monitor</h1>
-  <p>macOS 菜单栏里的 Claude Code 多会话状态与 Token 监控工具</p>
 
-  <p>
-    <a href="https://github.com/expAdd3/CC-Monitor/stargazers">
-      <img src="https://img.shields.io/github/stars/expAdd3/CC-Monitor?style=for-the-badge" alt="GitHub Stars" />
-    </a>
-    <a href="https://github.com/expAdd3/CC-Monitor/releases">
-      <img src="https://img.shields.io/github/v/release/expAdd3/CC-Monitor?style=for-the-badge" alt="Latest Release" />
-    </a>
-    <a href="https://github.com/expAdd3/CC-Monitor/blob/main/LICENSE">
-      <img src="https://img.shields.io/github/license/expAdd3/CC-Monitor?style=for-the-badge" alt="License" />
-    </a>
-    <img src="https://img.shields.io/badge/macOS-12%2B-black?style=for-the-badge&logo=apple" alt="macOS" />
-    <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
-    <img src="https://img.shields.io/badge/UI-rumps-4B8BBE?style=for-the-badge" alt="rumps" />
-    <img src="https://img.shields.io/badge/Storage-SQLite-003B57?style=for-the-badge&logo=sqlite" alt="SQLite" />
-  </p>
+<img src="assets/app_icon_color.svg" width="160" alt="CC Monitor Logo">
+
+<h1>CC Monitor</h1>
+
+<p>
+  macOS 菜单栏里的 Claude Code 多会话状态与 Token 监控工具
+</p>
+
+<p>
+  Monitor multiple Claude Code sessions from your macOS menu bar.
+</p>
+
+<p>
+  <a href="https://github.com/expAdd3/CC-Monitor/stargazers">
+    <img src="https://img.shields.io/github/stars/expAdd3/CC-Monitor?style=for-the-badge" alt="GitHub Stars">
+  </a>
+  <a href="https://github.com/expAdd3/CC-Monitor/releases">
+    <img src="https://img.shields.io/github/v/release/expAdd3/CC-Monitor?style=for-the-badge" alt="Release">
+  </a>
+  <a href="https://github.com/expAdd3/CC-Monitor/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/expAdd3/CC-Monitor?style=for-the-badge" alt="License">
+  </a>
+  <img src="https://img.shields.io/badge/macOS-12%2B-black?style=for-the-badge&logo=apple" alt="macOS">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python" alt="Python">
+</p>
+
+<br>
+
+<img src="assets/image-1.png" width="900" alt="CC Monitor Preview">
+
 </div>
 
-<div align="center">
-  <img src="assets/image-1.png" alt="CC Monitor menubar screenshot" />
-</div>
 
-> 解决多开 Claude Code 会话时“哪个结束了、哪个在等我、哪个需要介入”难以追踪的问题。
+## ✨ Overview
+
+CC Monitor is a lightweight macOS menu bar application designed for developers who run multiple Claude Code CLI sessions simultaneously.
+
+It provides real-time visibility into:
+
+- Which sessions are running
+- Which sessions are waiting for input
+- Which sessions need attention
+- Token consumption and estimated cost
+- Session completion notifications
+
 
 ---
 
-## Why CC Monitor
+# ✨ Features
 
-当你同时开多个 Claude Code CLI，会话结束时间不一致、窗口频繁切换会很低效。CC Monitor 提供：
 
-- 菜单栏实时总览（RUNNING / WAITING / NEEDS_INPUT）
-- 会话级别状态列表与活跃时长
-- Token / 成本统计（含按模型明细）
-- 会话完成或需要输入时的桌面通知
+### 🖥 Menu Bar Monitoring
+
+View all Claude Code sessions directly from the macOS menu bar.
+
+Supported states:
+
+- `RUNNING`
+- `WAITING`
+- `NEEDS_INPUT`
+
+
+### 🔔 Smart Notifications
+
+Receive desktop notifications when:
+
+- A session completes
+- Claude Code requires user interaction
+- A session state changes
+
+
+### 📊 Token & Cost Analytics
+
+Track:
+
+- Input tokens
+- Output tokens
+- Cache write tokens
+- Cache read tokens
+- Total usage
+- Estimated cost per model
+
+
+### 🧩 Reliable Event Tracking
+
+Hybrid monitoring architecture:
+
+- Claude Code Hooks for deterministic events
+- Transcript fallback for compatibility
+- SQLite persistent storage
+
+
+### 🛡 Safe Hook Design
+
+Hooks are designed to never interrupt Claude Code:
+
+- Independent execution
+- Failure isolation
+- Automatic fallback
+- Persistent state storage
+
 
 ---
 
-## Core Design
+# 🏗 Architecture
 
-CC Monitor 采用 **Hook 确定性事件 + 日志兜底** 的混合架构：
 
-- `cc_hook.py`：由 Claude Code hooks 调用，快速写入 `~/.cc-monitor/state.db`
-- `cc_monitor.py`：常驻读取 DB，统一聚合展示并处理通知去重
-- 日志兜底：对未安装 hook 的会话，从 transcript 启发式推断状态
+```mermaid
+flowchart LR
 
-```text
-Claude Code Sessions
-   ├─ Hook events (Stop/Notification/...) ──> cc_hook.py ──> ~/.cc-monitor/state.db
-   └─ Transcript fallback (.jsonl) ───────────> cc_monitor.py (merge)
-                                                   └─ Menubar + Notifications
+A[Claude Code Sessions]
+
+A --> B[Hook Events]
+A --> C[Transcript JSONL]
+
+B --> D[cc_hook.py]
+
+D --> E[(SQLite Database)]
+
+C --> F[cc_monitor.py]
+
+E --> F
+
+F --> G[macOS Menu Bar]
+
+F --> H[Desktop Notifications]
+
+F --> I[Token Analytics]
 ```
 
-通知采用 DB `notify_pending` 做边沿触发，避免重复弹窗且支持重启后状态保持。
+
+CC Monitor uses a **Hook + Transcript hybrid architecture**:
+
+
+```
+Claude Code Sessions
+
+    |
+    |-- Hook events
+    |       |
+    |       v
+    |   cc_hook.py
+    |       |
+    |       v
+    |   ~/.cc-monitor/state.db
+    |
+    |
+    |-- Transcript fallback
+            |
+            v
+       cc_monitor.py
+
+            |
+            +---- Menu Bar
+            |
+            +---- Notifications
+            |
+            +---- Token Statistics
+```
+
+
+Notification state uses database persistence to avoid duplicate notifications and survive application restarts.
+
 
 ---
 
-## Quick Start
+# 🚀 Quick Start
+
+
+## Install dependencies
 
 ```bash
 pip3 install rumps
+```
+
+
+## Install Claude Code Hooks
+
+```bash
 python3 install_hooks.py
-# 重启 Claude Code 会话，使 hooks 生效
+```
+
+
+Restart Claude Code sessions after installation.
+
+
+## Start Monitor
+
+```bash
 python3 cc_monitor.py
 ```
 
-说明：
 
-- 未安装 `rumps` 时，`cc_monitor.py` 会自动降级为终端模式。
-- 若希望点击通知优先唤起对应终端客户端，可安装：
+If `rumps` is unavailable, CC Monitor automatically falls back to terminal mode.
+
+
+Optional:
+
+Install `terminal-notifier` for better notification interaction:
 
 ```bash
 brew install terminal-notifier
 ```
 
+
 ---
 
-## Installation
+# 📦 Installation
 
-### 1) 安装依赖
+
+Clone repository:
+
+```bash
+git clone https://github.com/expAdd3/CC-Monitor.git
+
+cd CC-Monitor
+```
+
+
+Install:
 
 ```bash
 pip3 install rumps
-```
 
-### 2) 安装 hooks
-
-```bash
 python3 install_hooks.py
-```
 
-### 3) 启动监控
-
-```bash
 python3 cc_monitor.py
 ```
 
----
-
-## Token & Pricing
-
-- Token 来自 transcript `usage` 字段，兼容 Anthropic/OpenAI 常见映射
-- 去重策略兼容 ccusage 思路：优先 `(message_id, request_id)`，再做 message 级归并
-- 会话累计字段：
-  - `tok_input`
-  - `tok_output`
-  - `tok_cache_write`
-  - `tok_cache_read`
-  - `tok_total`
-- 成本字段：`cost_usd`
-- 若出现未知模型价格，标记 `cost_known=0`（token 仍可准确统计）
-- 价格来源：
-  - 内置：`prices.builtin.json`
-  - 用户覆盖：`~/.cc-monitor/prices.json`（示例：`prices.json.example`）
 
 ---
 
-## Build App (.app)
+# 📊 Token & Pricing
+
+
+Token information is extracted from Claude Code transcript usage data.
+
+
+Supported fields:
+
+| Field | Description |
+|-|-|
+| `tok_input` | Input tokens |
+| `tok_output` | Output tokens |
+| `tok_cache_write` | Cache write tokens |
+| `tok_cache_read` | Cache read tokens |
+| `tok_total` | Total tokens |
+| `cost_usd` | Estimated cost |
+
+
+Pricing system:
+
+- Built-in pricing:
+  - `prices.builtin.json`
+
+- User override:
+
+```
+~/.cc-monitor/prices.json
+```
+
+
+Unknown models:
+
+```
+cost_known = 0
+```
+
+Token statistics remain available even without pricing information.
+
+
+---
+
+# 🔨 Build Application
+
+
+Build macOS `.app`:
+
 
 ```bash
 ./scripts/build_app.sh
 ```
 
-产物：
 
-```text
+Output:
+
+```
 dist/CCMonitor.app
 ```
 
-> 建议使用脚本默认选择的非 conda Python 环境打包，避免动态库问题。
+
+Recommended:
+
+Use the script-selected system Python environment instead of conda Python to avoid dynamic library issues.
+
 
 ---
 
-## Uninstall
+# 🗑 Uninstall
+
 
 ```bash
 python3 uninstall.py
+
 pkill -f cc_monitor
-# 若安装过 .app：删除 /Applications/CCMonitor.app
 ```
 
----
 
-## Project Structure
+If installed:
 
-| File | Purpose |
-|------|---------|
-| `cc_monitor.py` | 菜单栏主程序：聚合、展示、通知与兜底逻辑 |
-| `cc_hook.py` | Hook 写库端：接收事件并更新会话状态 |
-| `cc_pricing.py` | Token 解析、去重、计费聚合 |
-| `install_hooks.py` | 安装 hooks（稳定副本路径 + 容错命令） |
-| `uninstall.py` | 卸载 hooks 与状态库 |
-| `setup.py` / `scripts/build_app.sh` | py2app 打包 |
-| `CCMonitor.spec` / `scripts/build_app_pyinstaller.sh` | PyInstaller 打包（备选） |
+```
+/Applications/CCMonitor.app
+```
+
+Remove the application manually.
+
 
 ---
 
-## Safety Notes
+# 📁 Project Structure
 
-本项目的 hook 设计目标是：**不阻断 Claude Code 正常使用**。
 
-- 安装时将 `cc_hook.py` 复制到稳定路径：`~/.cc-monitor/cc_hook.py`
-- 注册命令尾部使用 `|| true`，即便脚本缺失也不阻断输入
-- hook 进程内部异常吞掉并 `exit 0`
+```
+CC-Monitor
 
-若你遇到 hook 配置异常导致会话异常，可先清理 hooks 后重装：
+├── cc_monitor.py
+│   Main menu bar application
+
+├── cc_hook.py
+│   Claude Code hook receiver
+
+├── cc_pricing.py
+│   Token parsing and cost calculation
+
+├── install_hooks.py
+│   Hook installation
+
+├── uninstall.py
+│   Cleanup utility
+
+├── setup.py
+│   py2app configuration
+
+├── scripts/
+│   └── build_app.sh
+│       Application builder
+
+└── assets/
+    ├── app_icon_color.svg
+    └── screenshots
+```
+
+
+---
+
+# 🔒 Safety Notes
+
+
+CC Monitor hooks are designed with a non-blocking principle.
+
+
+During installation:
+
+- Hook script is copied to a stable path:
+
+```
+~/.cc-monitor/cc_hook.py
+```
+
+
+- Hook commands use:
+
+```bash
+|| true
+```
+
+
+- Internal errors are isolated
+- Hook always exits successfully
+
+
+If Claude Code behaves unexpectedly after installing hooks:
+
+Backup and clear hooks:
+
 
 ```bash
 python3 - <<'EOF'
-import os, json, shutil, time
+import os
+import json
+import shutil
+import time
+
 p = os.path.expanduser("~/.claude/settings.json")
+
 if not os.path.exists(p):
-    print("settings.json 不存在，无需处理")
+    print("settings.json not found")
     raise SystemExit
 
-shutil.copy(p, p + f".bak.{int(time.time())}")
+shutil.copy(
+    p,
+    p + f".bak.{int(time.time())}"
+)
 
 cfg = json.load(open(p))
+
 cfg.pop("hooks", None)
 
-json.dump(cfg, open(p, "w"), indent=2, ensure_ascii=False)
+json.dump(
+    cfg,
+    open(p, "w"),
+    indent=2,
+    ensure_ascii=False
+)
 
-print("✅ 已清空 hooks（已备份）")
+print("Hooks cleared successfully")
 EOF
 ```
 
+
 ---
 
-## Screenshots
+# 📸 Screenshots
 
-### Menubar
 
-![menubar](assets/demo-menubar.jpg)
+## Menu Bar
 
-### Notification
+<img src="assets/demo-menubar.jpg" width="700">
 
-![notification](assets/image.png)
 
-### Token
+## Notification
 
-![token](assets/image-2.png)
+<img src="assets/image.png" width="700">
 
-![token-detail](assets/image-3.png)
+
+## Token Overview
+
+<img src="assets/image-2.png" width="700">
+
+
+## Token Details
+
+<img src="assets/image-3.png" width="700">
+
+
+---
+
+# ❤️ Support
+
+
+If CC Monitor helps your Claude Code workflow, consider giving the project a ⭐ on GitHub.
+
+
+---
+
+<div align="center">
+
+Built for developers running multiple Claude Code sessions.
+
+</div>
