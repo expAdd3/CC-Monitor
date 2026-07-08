@@ -1,4 +1,3 @@
-````markdown
 <div align="center">
   <img src="assets/app_icon_color.svg" alt="CC Monitor logo" width="160" height="160" />
   <h1>CC Monitor</h1>
@@ -205,4 +204,3 @@ EOF
 ![token](assets/image-2.png)
 
 ![token-detail](assets/image-3.png)
-````
