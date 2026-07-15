@@ -575,21 +575,82 @@ def _query_daily_trend(conn, days):
     return [dict(r) for r in rows]
 
 
+# 历史趋势表格列宽(配合等宽字体菜单项,空格填充即可精确对齐)
+#   Date(左对齐) | Total | In | Out | Cost(均右对齐)
+_HIST_COL = "{day:<6}{total:>8}{inp:>8}{out:>8}{cost:>10}"
+_HIST_RULE = "─" * 40
+
+
 def _history_header_line():
-    return "    Day    Total      In      Out      Cost"
+    return _HIST_COL.format(day="Date", total="Total", inp="In", out="Out", cost="Cost")
 
 
 def _history_row_line(row):
     day = row.get("day", "")
     mmdd = day[5:] if len(day) >= 10 else day
-    total = _fmt_tokens_cost_style(row.get("tok_total", 0))
-    inp = _fmt_tokens_cost_style(row.get("tok_input", 0))
-    out = _fmt_tokens_cost_style(row.get("tok_output", 0))
-    cost = cc_pricing.fmt_usd(row.get("cost_usd", 0.0)) if cc_pricing else str(row.get("cost_usd", 0.0))
-    line = f"    {mmdd:<5}  {total:>7}  {inp:>7}  {out:>7}  {cost:>8}"
+    line = _HIST_COL.format(
+        day=mmdd,
+        total=_fmt_tokens_cost_style(row.get("tok_total", 0)),
+        inp=_fmt_tokens_cost_style(row.get("tok_input", 0)),
+        out=_fmt_tokens_cost_style(row.get("tok_output", 0)),
+        cost=cc_pricing.fmt_usd(row.get("cost_usd", 0.0)) if cc_pricing else str(row.get("cost_usd", 0.0)),
+    )
     if not row.get("cost_known", 1):
         line += " *"
     return line
+
+
+def _history_total_line(rows):
+    """区间合计行,列对齐与数据行一致。"""
+    tot = sum(r.get("tok_total", 0) for r in rows)
+    inp = sum(r.get("tok_input", 0) for r in rows)
+    out = sum(r.get("tok_output", 0) for r in rows)
+    cost = sum(r.get("cost_usd", 0.0) for r in rows)
+    known = all(r.get("cost_known", 1) for r in rows)
+    line = _HIST_COL.format(
+        day="Σ",
+        total=_fmt_tokens_cost_style(tot),
+        inp=_fmt_tokens_cost_style(inp),
+        out=_fmt_tokens_cost_style(out),
+        cost=cc_pricing.fmt_usd(cost) if cc_pricing else str(cost),
+    )
+    if not known:
+        line += " *"
+    return line
+
+
+def _mono_menu_item(text, bold=False):
+    """构造等宽字体菜单项,使空格填充的表格列在原生菜单里精确对齐。
+
+    rumps 默认用系统比例字体渲染菜单项标题,空格无法对齐;这里给标题套
+    等宽字体的 attributedTitle,列宽才真正对齐(修复"太乱"的根因)。
+    """
+    item = rumps.MenuItem(text)
+    try:
+        from AppKit import NSFont, NSFontAttributeName
+        from Foundation import NSAttributedString
+        weight = 0.3 if bold else 0.0
+        font = NSFont.monospacedSystemFontOfSize_weight_(12.0, weight)
+        s = NSAttributedString.alloc().initWithString_attributes_(
+            text, {NSFontAttributeName: font})
+        item._menuitem.setAttributedTitle_(s)
+    except Exception:
+        pass
+    return item
+
+
+def _build_trend_submenu(conn, title, days):
+    """构造一个「最近 N 天」子菜单:表头 + 对齐数据行 + 分隔线 + 合计行。"""
+    rows = _query_daily_trend(conn, days)
+    parent = rumps.MenuItem(title)
+    parent.add(_mono_menu_item(_history_header_line(), bold=True))
+    parent.add(_mono_menu_item(_HIST_RULE))
+    for row in rows:
+        parent.add(_mono_menu_item(_history_row_line(row)))
+    if rows:
+        parent.add(_mono_menu_item(_HIST_RULE))
+        parent.add(_mono_menu_item(_history_total_line(rows), bold=True))
+    return parent
 
 
 def summarize(conn):
@@ -816,43 +877,48 @@ def build_app():
 
                 total_w = (tok_x + tok_w if tok_str else dots_block_right) + 3.0
 
-                img = NSImage.alloc().initWithSize_((total_w, H))
-                img.setTemplate_(False)
-                img.lockFocus()
+                # ── 关键:用 imageWithSize:flipped:drawingHandler: 而非
+                #    lockFocus/unlockFocus。后者会把内容一次性栅格化到一个
+                #    固定 1x 位图里,Retina 菜单栏再按 2x 放大 → 越看越糊。
+                #    drawingHandler 是分辨率无关的:系统会在每个显示器的实际
+                #    缩放比例下重新调用它,矢量图标/圆点/文字始终锐利清晰。
+                def _draw(dst_rect):
+                    # 1) 左侧图标,垂直居中
+                    if icon_ns is not None:
+                        iy = (H - ICON_W) / 2.0
+                        icon_ns.drawInRect_fromRect_operation_fraction_(
+                            NSMakeRect(0.0, iy, ICON_W, ICON_W),
+                            NSMakeRect(0.0, 0.0, 0.0, 0.0), SRC_OVER, 1.0)
 
-                # 1) 左侧图标,垂直居中
-                if icon_ns is not None:
-                    iy = (H - ICON_W) / 2.0
-                    icon_ns.drawInRect_fromRect_operation_fraction_(
-                        NSMakeRect(0.0, iy, ICON_W, ICON_W),
-                        NSMakeRect(0.0, 0.0, 0.0, 0.0), SRC_OVER, 1.0)
-
-                # 2) 竖向三色点 + 计数(非翻转坐标:y 越大越靠上 → 绿在顶)
-                # 三行中心 y 等距分布,行距 7pt,确保 7pt 数字相互不粘连。
-                rows = [
-                    (17.0, NSColor.systemGreenColor(), labels[0]),
-                    (10.0, NSColor.systemYellowColor(), labels[1]),
-                    (3.0,  NSColor.systemRedColor(),    labels[2]),
-                ]
-                num_attrs = {NSFontAttributeName: num_font,
-                             NSForegroundColorAttributeName: txt_color}
-                for cy, color, s in rows:
-                    color.set()
-                    NSBezierPath.bezierPathWithOvalInRect_(
-                        NSMakeRect(dot_x, cy - DOT_R, DOT_R * 2, DOT_R * 2)).fill()
-                    _, nh, _ = _measure(s, num_font)
-                    NSString.stringWithString_(s).drawAtPoint_withAttributes_(
-                        NSMakePoint(num_x, cy - nh / 2.0), num_attrs)
-
-                # 3) 右侧放大的 token,垂直居中
-                if tok_str:
-                    tok_attrs = {NSFontAttributeName: tok_font,
+                    # 2) 竖向三色点 + 计数(非翻转坐标:y 越大越靠上 → 绿在顶)
+                    # 三行中心 y 等距分布,行距 7pt,确保 7pt 数字相互不粘连。
+                    rows = [
+                        (17.0, NSColor.systemGreenColor(), labels[0]),
+                        (10.0, NSColor.systemYellowColor(), labels[1]),
+                        (3.0,  NSColor.systemRedColor(),    labels[2]),
+                    ]
+                    num_attrs = {NSFontAttributeName: num_font,
                                  NSForegroundColorAttributeName: txt_color}
-                    _, th, _ = _measure(tok_str, tok_font)
-                    NSString.stringWithString_(tok_str).drawAtPoint_withAttributes_(
-                        NSMakePoint(tok_x, (H - th) / 2.0), tok_attrs)
+                    for cy, color, s in rows:
+                        color.set()
+                        NSBezierPath.bezierPathWithOvalInRect_(
+                            NSMakeRect(dot_x, cy - DOT_R, DOT_R * 2, DOT_R * 2)).fill()
+                        _, nh, _ = _measure(s, num_font)
+                        NSString.stringWithString_(s).drawAtPoint_withAttributes_(
+                            NSMakePoint(num_x, cy - nh / 2.0), num_attrs)
 
-                img.unlockFocus()
+                    # 3) 右侧放大的 token,垂直居中
+                    if tok_str:
+                        tok_attrs = {NSFontAttributeName: tok_font,
+                                     NSForegroundColorAttributeName: txt_color}
+                        _, th, _ = _measure(tok_str, tok_font)
+                        NSString.stringWithString_(tok_str).drawAtPoint_withAttributes_(
+                            NSMakePoint(tok_x, (H - th) / 2.0), tok_attrs)
+                    return True
+
+                img = NSImage.imageWithSize_flipped_drawingHandler_(
+                    (total_w, H), False, _draw)
+                img.setTemplate_(False)
 
                 # 用合成图整体替换按钮内容,清空 title 避免二次叠加
                 btn.setImage_(img)
@@ -1228,19 +1294,9 @@ def build_app():
 
             menu = [head, None]
 
-            hist_7 = rumps.MenuItem("最近7天")
-            hist_7.add(_history_header_line())
-            for row in _query_daily_trend(self.conn, 7):
-                hist_7.add(_history_row_line(row))
-
-            hist_30 = rumps.MenuItem("最近30天")
-            hist_30.add(_history_header_line())
-            for row in _query_daily_trend(self.conn, 30):
-                hist_30.add(_history_row_line(row))
-
             hist_parent = rumps.MenuItem("历史 Token 趋势")
-            hist_parent.add(hist_7)
-            hist_parent.add(hist_30)
+            hist_parent.add(_build_trend_submenu(self.conn, "最近7天", 7))
+            hist_parent.add(_build_trend_submenu(self.conn, "最近30天", 30))
             menu.append(hist_parent)
 
             menu.append(None)
