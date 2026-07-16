@@ -821,10 +821,6 @@ def build_app():
             if not icon_path:
                 return False
 
-            payload = (r, w, n, tok_tag)
-            if payload == self._last_status_render:
-                return True
-
             btn = self._status_button()
             if btn is None:
                 return False
@@ -834,8 +830,14 @@ def build_app():
                     NSImage, NSColor, NSFont, NSBezierPath,
                     NSFontAttributeName, NSForegroundColorAttributeName,
                     NSImageOnly,
+                    NSCompositingOperationSourceIn,
+                    NSRectFillUsingOperation,
                 )
                 from Foundation import NSString, NSMakePoint, NSMakeRect
+
+                payload = (r, w, n, tok_tag)
+                if payload == self._last_status_render:
+                    return True
 
                 H = 22.0                  # 菜单栏标题高度
                 ICON_W = 22.0             # 图标绘制尺寸(再放大一点)
@@ -848,21 +850,19 @@ def build_app():
 
                 num_font = NSFont.monospacedDigitSystemFontOfSize_weight_(NUM_PT, 0.0)
                 tok_font = NSFont.monospacedDigitSystemFontOfSize_weight_(TOK_PT, 0.0)
-                txt_color = NSColor.whiteColor()
 
                 # token 文本:去掉前导 " · " 分隔符
                 tok_str = (tok_tag or "").lstrip(" ·").strip()
 
                 def _measure(s, font):
-                    attrs = {NSFontAttributeName: font,
-                             NSForegroundColorAttributeName: txt_color}
+                    attrs = {NSFontAttributeName: font}
                     sz = NSString.stringWithString_(s).sizeWithAttributes_(attrs)
-                    return float(sz.width), float(sz.height), attrs
+                    return float(sz.width), float(sz.height)
 
                 labels = [str(r), str(w), str(n)]
                 num_w = 0.0
                 for s in labels:
-                    wd, _, _ = _measure(s, num_font)
+                    wd, _ = _measure(s, num_font)
                     num_w = max(num_w, wd)
 
                 dot_x = ICON_W + GAP
@@ -872,23 +872,30 @@ def build_app():
                 tok_w = 0.0
                 tok_x = dots_block_right
                 if tok_str:
-                    tok_w, _, _ = _measure(tok_str, tok_font)
+                    tok_w, _ = _measure(tok_str, tok_font)
                     tok_x = dots_block_right + GAP
 
                 total_w = (tok_x + tok_w if tok_str else dots_block_right) + 3.0
 
-                # ── 关键:用 imageWithSize:flipped:drawingHandler: 而非
-                #    lockFocus/unlockFocus。后者会把内容一次性栅格化到一个
-                #    固定 1x 位图里,Retina 菜单栏再按 2x 放大 → 越看越糊。
-                #    drawingHandler 是分辨率无关的:系统会在每个显示器的实际
-                #    缩放比例下重新调用它,矢量图标/圆点/文字始终锐利清晰。
-                def _draw(dst_rect):
-                    # 1) 左侧图标,垂直居中
+                def _draw(_dst_rect):
+                    # drawingHandler 在 AppKit 每次显示图像时执行；动态系统色
+                    # 会在当前菜单栏 appearance 下解析，切换主题无需通知或轮询。
+                    # labelColor/controlTextColor 的系统 alpha 约为 0.847，
+                    # 在菜单栏上会显得发灰；textColor 同样是动态黑/白，
+                    # 但 alpha 为 1.0，与高对比度状态栏图标保持一致。
+                    txt_color = NSColor.textColor()
+
+                    # 1) 左侧图标,垂直居中，并用动态前景色套 alpha 蒙版。
                     if icon_ns is not None:
+                        icon_ns.setTemplate_(False)
                         iy = (H - ICON_W) / 2.0
+                        icon_rect = NSMakeRect(0.0, iy, ICON_W, ICON_W)
                         icon_ns.drawInRect_fromRect_operation_fraction_(
-                            NSMakeRect(0.0, iy, ICON_W, ICON_W),
+                            icon_rect,
                             NSMakeRect(0.0, 0.0, 0.0, 0.0), SRC_OVER, 1.0)
+                        txt_color.set()
+                        NSRectFillUsingOperation(
+                            icon_rect, NSCompositingOperationSourceIn)
 
                     # 2) 竖向三色点 + 计数(非翻转坐标:y 越大越靠上 → 绿在顶)
                     # 三行中心 y 等距分布,行距 7pt,确保 7pt 数字相互不粘连。
@@ -903,7 +910,7 @@ def build_app():
                         color.set()
                         NSBezierPath.bezierPathWithOvalInRect_(
                             NSMakeRect(dot_x, cy - DOT_R, DOT_R * 2, DOT_R * 2)).fill()
-                        _, nh, _ = _measure(s, num_font)
+                        _, nh = _measure(s, num_font)
                         NSString.stringWithString_(s).drawAtPoint_withAttributes_(
                             NSMakePoint(num_x, cy - nh / 2.0), num_attrs)
 
@@ -911,7 +918,7 @@ def build_app():
                     if tok_str:
                         tok_attrs = {NSFontAttributeName: tok_font,
                                      NSForegroundColorAttributeName: txt_color}
-                        _, th, _ = _measure(tok_str, tok_font)
+                        _, th = _measure(tok_str, tok_font)
                         NSString.stringWithString_(tok_str).drawAtPoint_withAttributes_(
                             NSMakePoint(tok_x, (H - th) / 2.0), tok_attrs)
                     return True
@@ -924,7 +931,7 @@ def build_app():
                 btn.setImage_(img)
                 btn.setImagePosition_(NSImageOnly)
                 btn.setTitle_("")
-                self._last_status_render = (r, w, n, tok_tag)
+                self._last_status_render = payload
                 return True
             except Exception:
                 return False
@@ -945,6 +952,9 @@ def build_app():
             try:
                 from AppKit import NSImageOnly
                 if icon_ns is not None:
+                    # 仅图标模式没有彩色状态点，可直接使用 template image，
+                    # 让 AppKit 根据菜单栏背景实时选择前景色。
+                    icon_ns.setTemplate_(True)
                     btn.setImage_(icon_ns)
                 btn.setImagePosition_(NSImageOnly)
                 btn.setTitle_("")
@@ -1097,10 +1107,12 @@ def build_app():
                 NSWindowStyleMaskClosable,
                 NSWindowStyleMaskMiniaturizable,
                 NSBackingStoreBuffered,
-                NSButton, NSSwitch, NSTextField, NSView,
+                NSButton, NSSwitch, NSTextField, NSBox,
                 NSImage, NSImageView,
                 NSColor, NSFont,
-                NSTextAlignmentCenter
+                NSTextAlignmentCenter,
+                NSBoxCustom, NSNoTitle,
+                NSNormalWindowLevel,
             )
             from Foundation import NSMakeRect
 
@@ -1124,6 +1136,8 @@ def build_app():
             )
             win.setTitle_("CC Monitor 设置")
             win.setReleasedWhenClosed_(False)
+            # 使用普通窗口层级：激活时置前，切换到其他应用时正常退后。
+            win.setLevel_(NSNormalWindowLevel)
             content = win.contentView()
 
             # ── 顶部:应用图标 + 主标题 + 副标题 ─────────────────────
@@ -1154,17 +1168,17 @@ def build_app():
             # ── 卡片:菜单栏显示设置 ────────────────────────────────
             card_h = 76
             card_y = WIN_H - 146 - 20 - card_h
-            card = NSView.alloc().initWithFrame_(
+            # NSBox 直接保留动态 NSColor。不要把系统色转换成 CGColor：
+            # PyObjC 会为 CGColorRef 生成裸指针警告，而且转换后的颜色不会
+            # 随 effectiveAppearance 的变化重新解析。
+            card = NSBox.alloc().initWithFrame_(
                 NSMakeRect(MARGIN, card_y, CARD_W, card_h))
-            card.setWantsLayer_(True)
-            try:
-                layer = card.layer()
-                layer.setCornerRadius_(10.0)
-                layer.setBackgroundColor_(NSColor.controlBackgroundColor().CGColor())
-                layer.setBorderWidth_(1.0)
-                layer.setBorderColor_(NSColor.separatorColor().CGColor())
-            except Exception:
-                pass
+            card.setBoxType_(NSBoxCustom)
+            card.setTitlePosition_(NSNoTitle)
+            card.setCornerRadius_(10.0)
+            card.setBorderWidth_(1.0)
+            card.setFillColor_(NSColor.controlBackgroundColor())
+            card.setBorderColor_(NSColor.separatorColor())
             content.addSubview_(card)
 
             # 左侧:标题 + 灰色描述;右侧:开关右对齐,中间留白自然撑开
@@ -1253,9 +1267,12 @@ def build_app():
             try:
                 self._ensure_settings_window()
                 self._settings_window.center()
-                self._settings_window.makeKeyAndOrderFront_(None)
-                from AppKit import NSApp
+                from AppKit import NSApp, NSRunningApplication
+                current_app = NSRunningApplication.currentApplication()
+                current_app.activateWithOptions_(3)
                 NSApp.activateIgnoringOtherApps_(True)
+                self._settings_window.orderFrontRegardless()
+                self._settings_window.makeKeyWindow()
             except Exception as e:
                 rumps.alert("设置", f"打开设置窗口失败：{e}")
 
@@ -1316,6 +1333,8 @@ def build_app():
                                 reverse=True,
                             )
                             for model, usage in items:
+                                if model in ("<synthetic>", "synthetic"):
+                                    continue
                                 parent.add(_model_item_text(model, usage))
                         else:
                             parent.add("(暂无模型用量明细)")
