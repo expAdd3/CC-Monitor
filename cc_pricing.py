@@ -236,7 +236,8 @@ def extract_usage(usage: dict) -> dict:
         det = usage.get("prompt_tokens_details") or {}
         if isinstance(det, dict):
             cr = det.get("cached_tokens", 0) or 0
-            if cr and inp >= cr:
+            if cr:
+                cr = min(cr, inp)
                 inp = inp - cr
 
     return {
