@@ -280,11 +280,15 @@ def _usage_record(obj, include_sidechain=False):
     usage = msg.get("usage")
     if not isinstance(usage, dict):
         return None
+    # Skip synthetic/internal messages — no real API call, no cost.
+    model = msg.get("model", "")
+    if model in ("<synthetic>", "synthetic"):
+        return None
 
     u = extract_usage(usage)
     return {
         "usage": usage,
-        "model": msg.get("model", ""),
+        "model": model,
         "message_id": msg.get("id") or "",
         "request_id": _request_id_from_obj(obj, msg),
         "is_sidechain": is_sidechain,
