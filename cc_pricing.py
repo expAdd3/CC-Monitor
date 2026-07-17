@@ -14,12 +14,15 @@ token 数 vs. 算钱,是两件事:
     匹配不到价格的模型 → token 照样数,但成本标记为"未知"。
 """
 import os
+import re
 import sys
 import json
 import glob
 from datetime import datetime, timezone
 
 MTOK = 1_000_000.0
+
+_DATE_SUFFIX_RE = re.compile(r"(?:-\d{8}|-\d{4}-\d{2}-\d{2})$")
 
 def _resource_base_dir():
     here = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +49,7 @@ def _resource_base_dir():
 _BUILTIN_PRICES_PATH = os.path.join(_resource_base_dir(), "prices.builtin.json")
 _USER_PRICES_PATH = os.path.expanduser("~/.cc-monitor/prices.json")
 _PRICES_CACHE = None
+_INDEX_CACHE = None
 _SUMMARY_CACHE = {}
 
 
@@ -111,14 +115,109 @@ def _load_prices():
     return prices
 
 
-def prices_for(model: str):
-    m = (model or "").lower()
+def _normalize_model_id(model, *, remove_provider=False):
+    """Normalize a runtime model ID for reliable matching.
+
+    Handles provider prefixes, gateway suffixes, separator variants,
+    and other common noise so that ``anthropic/claude-sonnet-4-5:beta``
+    and ``claude-sonnet-4-5-20250929`` can be compared to price keys.
+    """
+    if not isinstance(model, str):
+        return ""
+    v = model.strip().lower()
+    # Keep only the part after the last provider prefix.
+    if remove_provider and "/" in v:
+        v = v.rsplit("/", 1)[-1]
+    # Drop gateway suffixes like :free, :exa, :beta.
+    if ":" in v:
+        v = v.split(":", 1)[0]
+    # Remove [1m] suffix some gateways append.
+    v = re.sub(r"\[1m\]$", "", v)
+    # Convert variant separators to dashes.
+    v = v.replace("@", "-")
+    v = v.replace("_", "-")
+    v = v.replace(".", "-")
+    v = re.sub(r"-+", "-", v)
+    return v.strip("-")
+
+
+def _strip_date(model):
+    """Remove trailing date suffix like -20250929 or -2025-09-29."""
+    return _DATE_SUFFIX_RE.sub("", model)
+
+
+def _model_candidates(model):
+    """Return deduplicated candidate IDs for a raw model string.
+
+    The first candidate keeps the full provider prefix (if any);
+    the second strips it so that ``anthropic/claude-sonnet-4-5`` can
+    match a bare key like ``claude-sonnet-4-5-20250929``.
+    """
+    candidates = [
+        _normalize_model_id(model, remove_provider=False),
+        _normalize_model_id(model, remove_provider=True),
+    ]
+    # Deduplicate while preserving order.
+    seen = set()
+    out = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _build_price_index(prices):
+    """Build normalized index: {norm_key: (orig_key, pricing_tuple)}."""
+    return {
+        _normalize_model_id(k, remove_provider=False): (k, v)
+        for k, v in prices.items()
+    }
+
+
+def _load_index():
+    """Load and cache the normalized price index.
+
+    Uses the same file-stat cache key as ``_load_prices`` so the
+    index is rebuilt automatically when ``prices.builtin.json`` or
+    ``~/.cc-monitor/prices.json`` changes.
+    """
+    global _INDEX_CACHE
+    ck = _prices_cache_key()
+    if _INDEX_CACHE and _INDEX_CACHE[0] == ck:
+        return _INDEX_CACHE[1]
     prices = _load_prices()
-    best = None
-    for fam, p in prices.items():
-        if fam in m and (best is None or len(fam) > len(best[0])):
-            best = (fam, p)
-    return best[1] if best else None
+    idx = _build_price_index(prices)
+    _INDEX_CACHE = (ck, idx)
+    return idx
+
+
+def prices_for(model: str):
+    """Return ``(input, cache_write, cache_read, output)`` pricing or None.
+
+    Matching order (cc-switch style):
+    1. Exact match against normalized model ID.
+    2. Date-stripped family match — only when exactly one dated entry
+       exists in the index; ambiguous multi-version families return None.
+    """
+    index = _load_index()
+    for candidate in _model_candidates(model):
+        # 1) Exact match.
+        hit = index.get(candidate)
+        if hit is not None:
+            return hit[1]
+        # 2) Date-stripped family match.
+        base = _strip_date(candidate)
+        matches = [
+            (orig_key, pricing)
+            for norm_key, (orig_key, pricing) in index.items()
+            if _strip_date(norm_key) == base
+        ]
+        if len(matches) == 1:
+            return matches[0][1]
+        if len(matches) > 1:
+            return None  # ambiguous — don't guess
+    return None
 
 
 def extract_usage(usage: dict) -> dict:
@@ -137,7 +236,8 @@ def extract_usage(usage: dict) -> dict:
         det = usage.get("prompt_tokens_details") or {}
         if isinstance(det, dict):
             cr = det.get("cached_tokens", 0) or 0
-            if cr and inp >= cr:
+            if cr:
+                cr = min(cr, inp)
                 inp = inp - cr
 
     return {
@@ -180,11 +280,15 @@ def _usage_record(obj, include_sidechain=False):
     usage = msg.get("usage")
     if not isinstance(usage, dict):
         return None
+    # Skip synthetic/internal messages — no real API call, no cost.
+    model = msg.get("model", "")
+    if model in ("<synthetic>", "synthetic"):
+        return None
 
     u = extract_usage(usage)
     return {
         "usage": usage,
-        "model": msg.get("model", ""),
+        "model": model,
         "message_id": msg.get("id") or "",
         "request_id": _request_id_from_obj(obj, msg),
         "is_sidechain": is_sidechain,
