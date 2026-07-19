@@ -14,6 +14,7 @@ cc_monitor.py —— Claude Code 多会话监控(菜单栏 App)
 """
 
 import os
+import fcntl
 import json
 import time
 import glob
@@ -21,6 +22,7 @@ import sqlite3
 import subprocess
 import sys
 import shutil
+import threading
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -39,14 +41,56 @@ try:
 except Exception:
     uninstall = None
 
+try:
+    import cc_notify
+except Exception:
+    cc_notify = None
+
 DB_DIR  = os.path.expanduser("~/.cc-monitor")
 DB_PATH = os.path.join(DB_DIR, "state.db")
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+INSTANCE_LOCK_PATH = os.path.join(DB_DIR, "cc-monitor.lock")
+_instance_lock_file = None
 
 REFRESH_SEC   = 2       # UI/兜底刷新间隔
 IDLE_HIDE_SEC = 1800    # 超过该秒无活动的会话不显示
 FALLBACK_RUNNING_GAP = 8    # 日志兜底:静默 < 此值视为运行中
 FALLBACK_WAIT_GAP    = 30   # 日志兜底:静默 > 此值且最后是助手文本 → 等待
+
+
+def acquire_instance_lock():
+    """保证只有一个 CC-Monitor 消费通知队列并发送远程消息。"""
+    global _instance_lock_file
+    os.makedirs(DB_DIR, exist_ok=True)
+    lock_file = open(INSTANCE_LOCK_PATH, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return False
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    _instance_lock_file = lock_file
+    return True
+
+
+def validate_notify_server(server):
+    """校验 ntfy 地址格式。"""
+    if not server:
+        return "请填写服务器地址"
+    try:
+        cc_notify.validate_server_url(server)
+    except ValueError as exc:
+        detail = str(exc)
+        if "用户名或密码" in detail:
+            return "请不要把用户名或密码写在服务器地址中"
+        if "查询参数或片段" in detail:
+            return "服务器地址不能包含查询参数或片段"
+        return detail
+    return ""
+
 
 # ========================= 内部/插件会话过滤 =========================
 # CC 用路径编码项目目录名: "/" → "-", "." → "-"
@@ -474,7 +518,7 @@ def macos_notify(title, subtitle, text, transcript_path=None, client_bundle_id=N
 
 
 def drain_notifications(conn):
-    """把所有 notify_pending=1 的会话弹一次,然后置 0(边沿触发,天然去重)。"""
+    """先发送并清除本地通知，再在后台发送远程通知。"""
     rows = conn.execute(
         "SELECT session_id,project,notify_kind,transcript_path,client_bundle_id FROM sessions WHERE notify_pending=1"
     ).fetchall()
@@ -489,6 +533,53 @@ def drain_notifications(conn):
     if rows:
         conn.execute("UPDATE sessions SET notify_pending=0 WHERE notify_pending=1")
         conn.commit()
+        _send_remote_async([dict(row) for row in rows])
+
+
+_remote_fail_count = 0
+_remote_had_failure = False
+_remote_state_lock = threading.Lock()
+REMOTE_FAILURE_NOTICE_LIMIT = 3
+
+
+def _send_remote_async(rows):
+    """Fire-and-forget；配置未启用时不创建线程。"""
+    if cc_notify is None:
+        return
+    cfg = cc_notify.load_config()
+    if not cfg.get("enabled") or not cfg.get("backends"):
+        return
+    threading.Thread(
+        target=_do_send_remote,
+        args=(rows, cfg),
+        name="cc-monitor-notify",
+        daemon=True,
+    ).start()
+
+
+def _do_send_remote(rows, cfg):
+    global _remote_fail_count, _remote_had_failure
+    try:
+        cc_notify.send_notifications(rows, config=cfg)
+    except Exception:
+        with _remote_state_lock:
+            _remote_fail_count += 1
+            _remote_had_failure = True
+            failure_count = _remote_fail_count
+            should_notify = failure_count <= REMOTE_FAILURE_NOTICE_LIMIT
+        if should_notify:
+            macos_notify(
+                "CC Monitor", "远程通知",
+                f"发送失败（连续 {failure_count} 次）⚠️",
+            )
+        return
+
+    with _remote_state_lock:
+        recovered = _remote_had_failure
+        _remote_fail_count = 0
+        _remote_had_failure = False
+    if recovered:
+        macos_notify("CC Monitor", "远程通知", "发送已恢复 ✅")
 
 
 # ========================= 汇总 =========================
@@ -791,6 +882,16 @@ def build_app():
         def __init__(self):
             super().__init__("CC", icon=icon_path, template=False,
                              quit_button=None)   # 关掉自动退出键,改为手动维护
+            # 提前切换为可激活应用，必须发生在 AppKit 主循环和输入法客户端
+            # 初始化之前。若等到首次打开设置窗口才切换，第一下键盘输入可能
+            # 触发 IMKCFRunLoopWakeUpReliable 的 Mach port 警告。
+            from AppKit import (
+                NSApplication,
+                NSApplicationActivationPolicyRegular,
+            )
+            app = NSApplication.sharedApplication()
+            app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+            self._main_menu = self._install_standard_edit_menu(app)
             if icon_ns is not None:
                 self._icon_nsimage = icon_ns  # 替换为 Retina 合成图标
             self._last_status_render = None
@@ -799,6 +900,44 @@ def build_app():
             self.icon_only = get_setting_bool(self.conn, "ui.menubar_icon_only", False)
             self.timer = rumps.Timer(self.tick, REFRESH_SEC)
             self.timer.start()
+
+        @staticmethod
+        def _install_standard_edit_menu(app):
+            """为代码创建的 AppKit 表单补齐 ⌘X/⌘C/⌘V/⌘A responder chain。"""
+            from AppKit import NSMenu, NSMenuItem
+
+            main_menu = NSMenu.alloc().initWithTitle_("CC Monitor")
+
+            app_item = NSMenuItem.alloc().init()
+            main_menu.addItem_(app_item)
+            app_menu = NSMenu.alloc().initWithTitle_("CC Monitor")
+            quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "退出 CC Monitor", "terminate:", "q")
+            app_menu.addItem_(quit_item)
+            main_menu.setSubmenu_forItem_(app_menu, app_item)
+
+            edit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "编辑", None, "")
+            main_menu.addItem_(edit_item)
+            edit_menu = NSMenu.alloc().initWithTitle_("编辑")
+            for title, action, key in (
+                ("撤销", "undo:", "z"),
+                ("重做", "redo:", "Z"),
+                (None, None, None),
+                ("剪切", "cut:", "x"),
+                ("复制", "copy:", "c"),
+                ("粘贴", "paste:", "v"),
+                ("全选", "selectAll:", "a"),
+            ):
+                if title is None:
+                    edit_menu.addItem_(NSMenuItem.separatorItem())
+                    continue
+                item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                    title, action, key)
+                edit_menu.addItem_(item)
+            main_menu.setSubmenu_forItem_(edit_menu, edit_item)
+            app.setMainMenu_(main_menu)
+            return main_menu
 
         def _status_button(self):
             try:
@@ -979,13 +1118,17 @@ def build_app():
             here = os.path.dirname(os.path.abspath(__file__))
             cands = [
                 os.path.join(here, name),
+                os.path.join(here, "assets", name),
                 os.path.join(here, "..", "Resources", name),
+                os.path.join(here, "..", "Resources", "assets", name),
             ]
             if getattr(sys, "frozen", False):
                 exe_dir = os.path.dirname(os.path.abspath(sys.executable))
                 cands.extend([
                     os.path.join(exe_dir, "..", "Resources", name),
+                    os.path.join(exe_dir, "..", "Resources", "assets", name),
                     os.path.join(exe_dir, "Resources", name),
+                    os.path.join(exe_dir, "Resources", "assets", name),
                 ])
             for p in cands:
                 if os.path.exists(p):
@@ -1107,12 +1250,13 @@ def build_app():
                 NSWindowStyleMaskClosable,
                 NSWindowStyleMaskMiniaturizable,
                 NSBackingStoreBuffered,
-                NSButton, NSSwitch, NSTextField, NSBox,
+                NSButton, NSSwitch, NSTextField, NSSecureTextField,
+                NSPopUpButton, NSBox, NSView,
                 NSImage, NSImageView,
                 NSColor, NSFont,
                 NSTextAlignmentCenter,
                 NSBoxCustom, NSNoTitle,
-                NSNormalWindowLevel,
+                NSNormalWindowLevel, NSWindowAbove,
             )
             from Foundation import NSMakeRect
 
@@ -1121,7 +1265,7 @@ def build_app():
             BEZEL_ROUNDED = 1   # NSBezelStyleRounded
             SIZE_LARGE    = 3   # NSControlSizeLarge
 
-            WIN_W, WIN_H = 460, 372
+            WIN_W, WIN_H = 460, 708
             MARGIN = 24
             CARD_W = WIN_W - MARGIN * 2
 
@@ -1136,6 +1280,8 @@ def build_app():
             )
             win.setTitle_("CC Monitor 设置")
             win.setReleasedWhenClosed_(False)
+            win.setIgnoresMouseEvents_(False)
+            win.setAcceptsMouseMovedEvents_(True)
             # 使用普通窗口层级：激活时置前，切换到其他应用时正常退后。
             win.setLevel_(NSNormalWindowLevel)
             content = win.contentView()
@@ -1203,15 +1349,15 @@ def build_app():
 
             # ── 分区小标题:HOOK ───────────────────────────────────
             sec = NSTextField.labelWithString_("HOOK 配置")
-            sec.setFrame_(NSMakeRect(MARGIN + 2, card_y - 34, CARD_W, 16))
+            sec.setFrame_(NSMakeRect(MARGIN + 2, card_y - 28, CARD_W, 16))
             sec.setFont_(NSFont.boldSystemFontOfSize_(11))
             sec.setTextColor_(NSColor.secondaryLabelColor())
             content.addSubview_(sec)
 
             # ── 两个按钮:主操作(蓝色默认键) + 危险操作 ─────────────
-            btn_h, btn_gap = 36, 16
+            btn_h, btn_gap = 32, 16
             btn_w = (CARD_W - btn_gap) / 2
-            btn_y = card_y - 34 - 18 - btn_h
+            btn_y = card_y - 28 - 12 - btn_h
 
             btn_install = NSButton.alloc().initWithFrame_(
                 NSMakeRect(MARGIN, btn_y, btn_w, btn_h))
@@ -1236,11 +1382,168 @@ def build_app():
             btn_remove.setAction_("_settings_action_remove:")
             content.addSubview_(btn_remove)
 
+            # ── 卡片:远程通知 ─────────────────────────────────────
+            ntfy_sec = NSTextField.labelWithString_("远程通知")
+            ntfy_sec.setFrame_(NSMakeRect(MARGIN + 2, btn_y - 28, CARD_W, 16))
+            ntfy_sec.setFont_(NSFont.boldSystemFontOfSize_(11))
+            ntfy_sec.setTextColor_(NSColor.secondaryLabelColor())
+            content.addSubview_(ntfy_sec)
+
+            ntfy_h = btn_y - 28 - 12 - 18
+            ntfy_card = NSBox.alloc().initWithFrame_(
+                NSMakeRect(MARGIN, 18, CARD_W, ntfy_h))
+            ntfy_card.setBoxType_(NSBoxCustom)
+            ntfy_card.setTitlePosition_(NSNoTitle)
+            ntfy_card.setCornerRadius_(10.0)
+            ntfy_card.setBorderWidth_(1.0)
+            ntfy_card.setFillColor_(NSColor.controlBackgroundColor())
+            ntfy_card.setBorderColor_(NSColor.separatorColor())
+            content.addSubview_(ntfy_card)
+
+            # NSBox 只负责绘制卡片背景。表单层必须是 contentView 中与 NSBox
+            # 并列的 sibling；若仍挂在 NSBox 下，NSBox 的内部 layout 会重排
+            # contentView，导致控件看得见却无法稳定收到鼠标和键盘事件。
+            ntfy_form = NSView.alloc().initWithFrame_(
+                NSMakeRect(MARGIN, 18, CARD_W, ntfy_h))
+            content.addSubview_positioned_relativeTo_(
+                ntfy_form, NSWindowAbove, ntfy_card)
+
+            cfg = cc_notify.load_config() if cc_notify else {}
+            backends = cfg.get("backends") or []
+            backend = backends[0] if backends else {}
+            self._notify_extra_backends = list(backends[1:])
+
+            remote_title = NSTextField.labelWithString_("启用远程推送")
+            remote_title.setFrame_(NSMakeRect(18, ntfy_h - 35, 220, 18))
+            remote_title.setFont_(NSFont.systemFontOfSize_(13))
+            ntfy_form.addSubview_(remote_title)
+
+            remote_toggle = NSSwitch.alloc().initWithFrame_(
+                NSMakeRect(CARD_W - 60, ntfy_h - 39, 42, 24))
+            remote_toggle.setState_(1 if cfg.get("enabled") else 0)
+            ntfy_form.addSubview_(remote_toggle)
+
+            def add_label(text, x, y, width):
+                label = NSTextField.labelWithString_(text)
+                label.setFrame_(NSMakeRect(x, y, width, 16))
+                label.setFont_(NSFont.systemFontOfSize_(11))
+                label.setTextColor_(NSColor.secondaryLabelColor())
+                ntfy_form.addSubview_(label)
+
+            def add_text_field(value, x, y, width, secure=False):
+                field_class = NSSecureTextField if secure else NSTextField
+                field = field_class.alloc().initWithFrame_(
+                    NSMakeRect(x, y, width, 25))
+                field.setStringValue_(str(value or ""))
+                field.setFont_(NSFont.systemFontOfSize_(12))
+                field.setEditable_(True)
+                field.setSelectable_(True)
+                field.setEnabled_(True)
+                ntfy_form.addSubview_(field)
+                return field
+
+            inner_x, inner_w = 18, CARD_W - 36
+            add_label("服务器地址", inner_x, ntfy_h - 69, inner_w)
+            server_field = add_text_field(
+                backend.get("server", ""), inner_x, ntfy_h - 97, inner_w)
+
+            half_w = (inner_w - 12) / 2
+            add_label("用户名", inner_x, ntfy_h - 125, half_w)
+            add_label("密码", inner_x + half_w + 12, ntfy_h - 125, half_w)
+            username_field = add_text_field(
+                backend.get("username", ""), inner_x, ntfy_h - 153, half_w)
+            password_field = add_text_field(
+                backend.get("password", ""), inner_x + half_w + 12,
+                ntfy_h - 153, half_w, secure=True)
+
+            add_label(
+                "Topic（🔒 根据用户名自动生成）",
+                inner_x, ntfy_h - 181, inner_w)
+            username_value = str(backend.get("username", "") or "").strip()
+            derived_topic = (
+                f"{username_value}-cc-monitor" if username_value else "")
+            topic_field = add_text_field(
+                derived_topic, inner_x, ntfy_h - 209, inner_w)
+            topic_field.setEditable_(False)
+            topic_field.setSelectable_(True)
+            topic_field.setTextColor_(NSColor.secondaryLabelColor())
+            topic_field.setBackgroundColor_(NSColor.windowBackgroundColor())
+
+            popup_gap = 12
+            popup_w = (inner_w - popup_gap) / 2
+            popup_y = ntfy_h - 265
+            labels = ("DONE 优先级", "NEEDS_INPUT 优先级")
+            choices = (
+                ["min", "low", "default", "high", "urgent"],
+                ["min", "low", "default", "high", "urgent"],
+            )
+            selected = (
+                (cfg.get("priority_mapping") or {}).get("DONE", "default"),
+                (cfg.get("priority_mapping") or {}).get("NEEDS_INPUT", "urgent"),
+            )
+            popups = []
+            for index in range(2):
+                x = inner_x + index * (popup_w + popup_gap)
+                add_label(labels[index], x, popup_y + 28, popup_w)
+                popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(x, popup_y, popup_w, 25), False)
+                popup.addItemsWithTitles_(choices[index])
+                popup.selectItemWithTitle_(selected[index])
+                ntfy_form.addSubview_(popup)
+                popups.append(popup)
+
+            action_y = 16
+            action_w = (inner_w - 12) / 2
+            test_button = NSButton.alloc().initWithFrame_(
+                NSMakeRect(inner_x, action_y, action_w, 30))
+            test_button.setBezelStyle_(BEZEL_ROUNDED)
+            test_button.setTitle_("🧪 测试发送")
+            test_button.setTarget_(self)
+            test_button.setAction_("_notify_test:")
+            ntfy_form.addSubview_(test_button)
+
+            save_button = NSButton.alloc().initWithFrame_(
+                NSMakeRect(inner_x + action_w + 12, action_y, action_w, 30))
+            save_button.setBezelStyle_(BEZEL_ROUNDED)
+            save_button.setTitle_("💾 保存配置")
+            save_button.setTarget_(self)
+            save_button.setAction_("_notify_save:")
+            ntfy_form.addSubview_(save_button)
+
             self._settings_window = win
             self._settings_toggle = toggle
-        
+            self._notify_enabled = remote_toggle
+            self._notify_server = server_field
+            self._notify_username = username_field
+            self._notify_password = password_field
+            self._notify_topic = topic_field
+            self._notify_done_priority = popups[0]
+            self._notify_input_priority = popups[1]
+            self._notify_test_button = test_button
+            self._notify_first_field = server_field
+            self._notify_hostname = cfg.get("hostname", "")
+
+            # NSTextField 的 target/action 只会在回车或结束编辑时触发；
+            # 监听文本变化通知才能逐字符实时刷新派生 Topic。
+            from AppKit import NSControlTextDidChangeNotification
+            from Foundation import NSNotificationCenter, NSOperationQueue
+            center = NSNotificationCenter.defaultCenter()
+            self._notify_username_observer = (
+                center.addObserverForName_object_queue_usingBlock_(
+                    NSControlTextDidChangeNotification,
+                    username_field,
+                    NSOperationQueue.mainQueue(),
+                    lambda _notification: self._sync_notify_topic(),
+                )
+            )
+
         def _settings_action_toggle_(self, _sender):
             self._set_icon_only(self._settings_toggle.state() == 1)
+
+        def _sync_notify_topic(self):
+            username = self._notify_username.stringValue().strip()
+            self._notify_topic.setStringValue_(
+                f"{username}-cc-monitor" if username else "")
 
         def _confirm_action(self, title, message):
             from AppKit import NSAlert
@@ -1263,21 +1566,123 @@ def build_app():
             ok, msg = self._run_action_safely(self._remove_hook_only, "Hook 已移除")
             self._show_settings_alert("移除结果", ("✅ " if ok else "❌ ") + msg)
 
+        def _notify_form_config(self):
+            username = self._notify_username.stringValue().strip()
+            topic = f"{username}-cc-monitor" if username else ""
+            self._notify_topic.setStringValue_(topic)
+            return {
+                "enabled": self._notify_enabled.state() == 1,
+                "hostname": self._notify_hostname,
+                "priority_mapping": {
+                    "DONE": self._notify_done_priority.titleOfSelectedItem(),
+                    "NEEDS_INPUT": self._notify_input_priority.titleOfSelectedItem(),
+                },
+                "backends": [{
+                    "type": "ntfy",
+                    "server": self._notify_server.stringValue().strip(),
+                    "topic": topic,
+                    "username": username,
+                    "password": self._notify_password.stringValue(),
+                }] + list(self._notify_extra_backends),
+            }
+
+        def _validate_notify_config(self, config):
+            backend = config["backends"][0]
+            if not backend["username"]:
+                return "请填写用户名；Topic 将自动生成为 {username}-cc-monitor"
+            return validate_notify_server(backend["server"])
+
+        def _notify_save_(self, _sender):
+            if cc_notify is None:
+                self._show_settings_alert("保存失败", "无法加载 cc_notify 模块")
+                return
+            config = self._notify_form_config()
+            error = self._validate_notify_config(config)
+            if error:
+                self._show_settings_alert("保存失败", error)
+                return
+            try:
+                cc_notify.save_config(config)
+                self._show_settings_alert("远程通知", "✅ 配置已保存")
+            except Exception as exc:
+                self._show_settings_alert("保存失败", str(exc))
+
+        def _notify_test_(self, _sender):
+            if cc_notify is None:
+                self._show_settings_alert("测试发送", "无法加载 cc_notify 模块")
+                return
+            config = self._notify_form_config()
+            error = self._validate_notify_config(config)
+            if error:
+                self._show_settings_alert("测试发送", error)
+                return
+            self._notify_test_button.setEnabled_(False)
+            self._notify_test_button.setTitle_("发送中…")
+            threading.Thread(
+                target=self._notify_test_worker,
+                args=(config,),
+                name="cc-monitor-notify-test",
+                daemon=True,
+            ).start()
+
+        def _notify_test_worker(self, config):
+            try:
+                cc_notify.send_test(config["backends"][0], config=config)
+                result = "✅ 发送成功，请检查订阅端"
+            except Exception as exc:
+                result = f"❌ 发送失败：{exc}"
+            # CCMonitor 是 rumps.App（普通 Python 对象），不是 NSObject，
+            # 因此不能调用 performSelectorOnMainThread...。AppHelper 会把
+            # Python callable 安全投递到 AppKit 主线程。
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(self._notify_test_finished_, result)
+
+        def _notify_test_finished_(self, result):
+            self._notify_test_button.setEnabled_(True)
+            self._notify_test_button.setTitle_("🧪 测试发送")
+            self._show_settings_alert("测试发送", result)
+
+        def _focus_settings_window(self):
+            """菜单关闭后一次性激活窗口并把键盘交给表单。"""
+            from AppKit import (
+                NSApp,
+                NSRunningApplication,
+                NSApplicationActivateAllWindows,
+                NSApplicationActivateIgnoringOtherApps,
+            )
+            NSApp.unhide_(None)
+            current_app = NSRunningApplication.currentApplication()
+            current_app.activateWithOptions_(
+                NSApplicationActivateAllWindows
+                | NSApplicationActivateIgnoringOtherApps
+            )
+            NSApp.activateIgnoringOtherApps_(True)
+            self._settings_window.setIgnoresMouseEvents_(False)
+            self._settings_window.orderFrontRegardless()
+            self._settings_window.makeKeyAndOrderFront_(None)
+            self._settings_window.makeMainWindow()
+            self._settings_window.makeFirstResponder_(self._notify_first_field)
+
         def open_settings(self, _):
             try:
                 self._ensure_settings_window()
                 self._settings_window.center()
-                from AppKit import NSApp, NSRunningApplication
-                current_app = NSRunningApplication.currentApplication()
-                current_app.activateWithOptions_(3)
-                NSApp.activateIgnoringOtherApps_(True)
-                self._settings_window.orderFrontRegardless()
-                self._settings_window.makeKeyWindow()
+                # rumps 回调执行时状态栏菜单仍在接收键盘事件；延迟到下一轮
+                # AppKit 主循环，避免输入继续落到启动 CC-Monitor 的终端。
+                from PyObjCTools import AppHelper
+                AppHelper.callAfter(self._focus_settings_window)
             except Exception as e:
                 rumps.alert("设置", f"打开设置窗口失败：{e}")
 
         def cleanup_quit(self, _):
             """关闭数据库连接后再退出。"""
+            observer = getattr(self, "_notify_username_observer", None)
+            if observer is not None:
+                try:
+                    from Foundation import NSNotificationCenter
+                    NSNotificationCenter.defaultCenter().removeObserver_(observer)
+                except Exception:
+                    pass
             try:
                 self.conn.close()
             except Exception:
@@ -1387,6 +1792,9 @@ def run_cli():
 
 
 if __name__ == "__main__":
+    if not acquire_instance_lock():
+        print("CC-Monitor 已在运行，本次启动退出。")
+        sys.exit(0)
     if HAS_RUMPS:
         build_app().run()
     else:

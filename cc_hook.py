@@ -46,6 +46,13 @@ EVENT_TO_STATUS = {
 
 # 哪些状态是"需要弹通知的边沿"(由 App 读 notify_pending 决定是否真弹)
 NOTIFY_STATES = {"WAITING", "NEEDS_INPUT"}
+ACTIONABLE_NOTIFICATION_TYPES = {"permission_prompt", "elicitation_dialog"}
+NON_ACTIONABLE_NOTIFICATION_TYPES = {
+    "idle_prompt",
+    "auth_success",
+    "elicitation_complete",
+    "elicitation_response",
+}
 
 
 def _bundle_id_from_env():
@@ -152,6 +159,13 @@ def get_previous_session(conn, sid):
 def upsert(conn, payload):
     sid   = payload.get("session_id") or "unknown"
     event = payload.get("hook_event_name") or "unknown"
+    notification_type = (
+        str(payload.get("notification_type") or "").strip()
+        if event == "Notification" else ""
+    )
+    event_label = (
+        f"{event}:{notification_type}" if notification_type else event
+    )
     cwd   = payload.get("cwd") or ""
     tpath = payload.get("transcript_path") or ""
     project = os.path.basename(cwd.rstrip("/")) if cwd else "(unknown)"
@@ -164,6 +178,11 @@ def upsert(conn, payload):
     ask_user_question = is_ask_user_question(payload)
 
     status = EVENT_TO_STATUS.get(event, "RUNNING")
+    if event == "Notification":
+        if notification_type == "idle_prompt":
+            status = "WAITING"
+        elif notification_type in NON_ACTIONABLE_NOTIFICATION_TYPES:
+            status = "RUNNING"
     if ask_user_question:
         status = "NEEDS_INPUT"
 
@@ -177,7 +196,13 @@ def upsert(conn, payload):
         else:
             notify_kind, notify_pending = "DONE", 1
     elif event == "Notification":
-        if prev_status != "NEEDS_INPUT":
+        # idle_prompt 通常在 Stop 后约 60 秒触发，只表示仍在等待用户，
+        # 不能再发一次 NEEDS_INPUT。未知类型保持兼容旧版 Claude Code。
+        actionable = (
+            notification_type in ACTIONABLE_NOTIFICATION_TYPES
+            or notification_type not in NON_ACTIONABLE_NOTIFICATION_TYPES
+        )
+        if actionable and prev_status != "NEEDS_INPUT":
             notify_kind, notify_pending = "NEEDS_INPUT", 1
     elif ask_user_question:
         notify_kind, notify_pending = "NEEDS_INPUT", 1
@@ -208,11 +233,11 @@ def upsert(conn, payload):
             client_bundle_id=CASE WHEN excluded.client_bundle_id != ''
                                   THEN excluded.client_bundle_id ELSE sessions.client_bundle_id END,
             source='hook'
-    """, (sid, cwd, project, status, event, now,
+    """, (sid, cwd, project, status, event_label, now,
           turn_started, notify_pending, notify_kind, tpath, client_bundle_id))
 
     conn.execute("INSERT INTO events(session_id,event,ts) VALUES(?,?,?)",
-                 (sid, event, now))
+                 (sid, event_label, now))
     conn.commit()
 
 

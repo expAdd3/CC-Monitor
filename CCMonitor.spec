@@ -10,11 +10,13 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
+        ('assets/AppIcon.icns', 'assets'),
         ('assets/menubar_color.png', 'assets'),
         ('assets/menubar_color@2x.png', 'assets'),
         ('prices.builtin.json', '.'),
+        ('cc_notify.py', '.'),
     ],
-    hiddenimports=['rumps', 'cc_pricing'],   # rumps 内部动态导入 pyobjc,显式声明更稳
+    hiddenimports=['rumps', 'cc_pricing', 'cc_notify'],   # 动态导入显式声明更稳
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

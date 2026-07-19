@@ -70,6 +70,12 @@ Receive desktop notifications when:
 - Claude Code requires user interaction
 - A session state changes
 
+Remote push notifications can also be configured directly in **Settings →
+Remote Notifications**. CC-Monitor supports self-hosted
+[ntfy](deploy/README.md), sends without blocking the menu-bar refresh loop, and
+keeps credentials in `~/.cc-monitor/notify.json`.
+The ntfy topic is derived from the username as `{username}-cc-monitor`.
+
 
 ### 📊 Token & Cost Analytics
 

@@ -25,13 +25,15 @@ OPTIONS = {
         "NSHumanReadableCopyright": "Personal tool",
     },
     "packages": ["rumps"],
-    "includes": ["cc_pricing"],
+    "includes": ["cc_pricing", "cc_notify"],
     "resources": [
+        "assets/AppIcon.icns",
         "assets/menubar_color.png",
         "assets/menubar_color@2x.png",
         "prices.builtin.json",
         "cc_hook.py",
         "cc_pricing.py",
+        "cc_notify.py",
     ],
     # 将 hook 相关脚本也打进 Resources,保证 .app 内设置功能可直接调用
 }
