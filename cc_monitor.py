@@ -561,16 +561,17 @@ def _do_send_remote(rows, cfg):
     global _remote_fail_count, _remote_had_failure
     try:
         cc_notify.send_notifications(rows, config=cfg)
-    except Exception:
+    except Exception as exc:
         with _remote_state_lock:
             _remote_fail_count += 1
             _remote_had_failure = True
             failure_count = _remote_fail_count
             should_notify = failure_count <= REMOTE_FAILURE_NOTICE_LIMIT
         if should_notify:
+            detail = str(exc).split("\n")[0]
             macos_notify(
                 "CC Monitor", "远程通知",
-                f"发送失败（连续 {failure_count} 次）⚠️",
+                f"发送失败（连续 {failure_count} 次）⚠️\n{detail}",
             )
         return
 
@@ -1520,7 +1521,6 @@ def build_app():
             self._notify_done_priority = popups[0]
             self._notify_input_priority = popups[1]
             self._notify_test_button = test_button
-            self._notify_first_field = server_field
             self._notify_hostname = cfg.get("hostname", "")
 
             # NSTextField 的 target/action 只会在回车或结束编辑时触发；
@@ -1643,7 +1643,7 @@ def build_app():
             self._show_settings_alert("测试发送", result)
 
         def _focus_settings_window(self):
-            """菜单关闭后一次性激活窗口并把键盘交给表单。"""
+            """菜单关闭后激活窗口；输入框等待用户点击后再获得焦点。"""
             from AppKit import (
                 NSApp,
                 NSRunningApplication,
@@ -1661,7 +1661,9 @@ def build_app():
             self._settings_window.orderFrontRegardless()
             self._settings_window.makeKeyAndOrderFront_(None)
             self._settings_window.makeMainWindow()
-            self._settings_window.makeFirstResponder_(self._notify_first_field)
+            # 窗口会被缓存复用，关闭前的输入框仍可能保留 first responder。
+            # 显式清除，避免打开窗口时立即唤醒 macOS 输入法。
+            self._settings_window.makeFirstResponder_(None)
 
         def open_settings(self, _):
             try:

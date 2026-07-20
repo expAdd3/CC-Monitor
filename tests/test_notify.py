@@ -131,6 +131,25 @@ class NotifySendTests(unittest.TestCase):
                     config=config,
                 )
 
+    def test_all_failures_multi_backend_includes_count(self):
+        config = {
+            "enabled": True,
+            "hostname": "",
+            "priority_mapping": {},
+            "backends": [
+                {"type": "ntfy", "server": "https://a", "topic": "t1"},
+                {"type": "ntfy", "server": "https://b", "topic": "t2"},
+            ],
+        }
+        with mock.patch.object(
+            cc_notify, "_send_one", side_effect=OSError("offline")
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"2 个后端均失败"):
+                cc_notify.send_notifications(
+                    [{"project": "p", "notify_kind": "DONE"}],
+                    config=config,
+                )
+
     def test_disabled_or_empty_backend_config_sends_nothing(self):
         rows = [{"project": "p", "notify_kind": "DONE"}]
         with mock.patch.object(cc_notify, "_send_one") as sender:
@@ -225,6 +244,178 @@ class NotifySendTests(unittest.TestCase):
                 cc_notify._send_ntfy(
                     backend, "标题", "正文", "default", "warning"
                 )
+
+    def test_ntfy_http_error_truncates_long_body(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        long_body = "x" * 300
+        error = urllib.error.HTTPError(
+            backend["server"],
+            500,
+            "Server Error",
+            {},
+            io.BytesIO(long_body.encode("utf-8")),
+        )
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+            msg = str(ctx.exception)
+            self.assertIn("500", msg)
+            self.assertIn("…", msg)
+            self.assertLess(len(msg), 350)
+
+    def test_ntfy_html_error_extracts_title(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        html = (
+            "<html><head><title>Non-compliance ICP Filing</title></head>"
+            "<body><p>blocked</p></body></html>"
+        )
+        error = urllib.error.HTTPError(
+            backend["server"],
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(html.encode("utf-8")),
+        )
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+            msg = str(ctx.exception)
+            self.assertIn("403", msg)
+            self.assertIn("Non-compliance ICP Filing", msg)
+            self.assertNotIn("<html>", msg)
+
+    def test_ntfy_html_error_without_title(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        html = "<html><body>blocked</body></html>"
+        error = urllib.error.HTTPError(
+            backend["server"],
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(html.encode("utf-8")),
+        )
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+            msg = str(ctx.exception)
+            self.assertIn("403", msg)
+            self.assertIn("HTML", msg)
+            self.assertNotIn("<html>", msg)
+
+    def test_ntfy_html_error_normalizes_and_truncates_multiline_title(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        html = (
+            "<html><head><title>Proxy\n    Error "
+            + "x" * 300
+            + "</title></head><body>blocked</body></html>"
+        )
+        error = urllib.error.HTTPError(
+            backend["server"],
+            502,
+            "Bad Gateway",
+            {},
+            io.BytesIO(html.encode("utf-8")),
+        )
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+        msg = str(ctx.exception)
+        self.assertIn("Proxy Error", msg)
+        self.assertIn("…", msg)
+        self.assertNotIn("\n", msg)
+        self.assertLess(len(msg), 250)
+
+    def test_ntfy_url_error_connection_refused(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        error = urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+            msg = str(ctx.exception)
+            self.assertIn("连接被拒绝", msg)
+
+    def test_ntfy_url_error_dns_failure(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        error = urllib.error.URLError(OSError("getaddrinfo failed"))
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+            msg = str(ctx.exception)
+            self.assertIn("DNS", msg)
+
+    def test_ntfy_url_error_timeout(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        error = urllib.error.URLError(TimeoutError("timed out"))
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+            msg = str(ctx.exception)
+            self.assertIn("超时", msg)
+
+    def test_ntfy_url_error_unknown(self):
+        backend = {
+            "server": "https://ntfy.example.com",
+            "topic": "alice-cc-monitor",
+        }
+        error = urllib.error.URLError(OSError("some unknown error"))
+        with mock.patch.object(
+            cc_notify.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                cc_notify._send_ntfy(
+                    backend, "标题", "正文", "default", "warning"
+                )
+            msg = str(ctx.exception)
+            self.assertIn("网络连接失败", msg)
 
     def test_ntfy_rejects_missing_server_or_topic(self):
         for backend in (

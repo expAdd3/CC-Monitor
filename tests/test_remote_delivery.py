@@ -99,9 +99,9 @@ class RemoteDeliveryTests(unittest.TestCase):
             self.assertEqual(
                 [call.args[2] for call in local.call_args_list],
                 [
-                    "发送失败（连续 1 次）⚠️",
-                    "发送失败（连续 2 次）⚠️",
-                    "发送失败（连续 3 次）⚠️",
+                    "发送失败（连续 1 次）⚠️\noffline",
+                    "发送失败（连续 2 次）⚠️\noffline",
+                    "发送失败（连续 3 次）⚠️\noffline",
                 ],
             )
             self.assertEqual(cc_monitor._remote_fail_count, 4)

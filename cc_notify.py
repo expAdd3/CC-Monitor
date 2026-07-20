@@ -5,11 +5,19 @@ import base64
 import copy
 import json
 import os
+import re
 import socket
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+
+_HTML_TAGS = frozenset({
+    "<!doctype", "<html", "<head", "<body", "<meta",
+    "<iframe", "<style", "<script", "<title", "<link",
+})
+
+_MAX_ERROR_BODY = 200
 
 CONFIG_DIR = os.path.expanduser("~/.cc-monitor")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "notify.json")
@@ -33,6 +41,46 @@ _NTFY_PRIORITY = {
     "high": 4,
     "urgent": 5,
 }
+
+
+def _format_http_error(status_code, body):
+    """将 HTTP 错误体格式化为可读的一句提示，避免 HTML 刷屏。"""
+    if not body:
+        return f"ntfy 返回 HTTP {status_code}"
+    lower = body.lower()
+    if any(tag in lower for tag in _HTML_TAGS):
+        # 阿里云 ICP 拦截等 HTML 页面 — 尝试提取 <title>
+        match = re.search(
+            r"<title>(.+?)</title>",
+            body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            hint = re.sub(r"\s+", " ", match.group(1)).strip()
+            if len(hint) > _MAX_ERROR_BODY:
+                hint = hint[:_MAX_ERROR_BODY] + "…"
+            return f"ntfy 返回 HTTP {status_code}（{hint}）"
+        return f"ntfy 返回 HTTP {status_code}（服务器返回的是 HTML 页面而非 JSON）"
+    if len(body) > _MAX_ERROR_BODY:
+        body = body[:_MAX_ERROR_BODY] + "…"
+    return f"ntfy 返回 HTTP {status_code}：{body}"
+
+
+def _format_url_error(exc):
+    """将 URLError 格式化为中文可读的一句话。"""
+    reason = str(exc.reason) if exc.reason else str(exc)
+    # 常见错误映射
+    if "Connection refused" in reason or "Errno 61" in reason:
+        return f"无法连接到 ntfy 服务器（连接被拒绝）"
+    if "Name or service not known" in reason or "getaddrinfo" in reason:
+        return f"无法解析 ntfy 服务器地址（DNS 失败）"
+    if "timed out" in reason.lower():
+        return f"连接 ntfy 服务器超时"
+    if "No route to host" in reason:
+        return f"无法连接到 ntfy 服务器（无路由）"
+    if "certificate" in reason.lower() or "SSL" in reason:
+        return f"ntfy 服务器 SSL 证书错误：{reason}"
+    return f"网络连接失败：{reason}"
 
 
 def validate_server_url(server):
@@ -151,11 +199,12 @@ def _send_ntfy(backend, title, message, priority, tags):
                 raise RuntimeError(f"ntfy 返回 HTTP {response.status}")
     except urllib.error.HTTPError as exc:
         try:
-            detail = exc.read().decode("utf-8", errors="replace").strip()
+            body = exc.read().decode("utf-8", errors="replace").strip()
         except Exception:
-            detail = ""
-        suffix = f"：{detail}" if detail else ""
-        raise RuntimeError(f"ntfy 返回 HTTP {exc.code}{suffix}") from exc
+            body = ""
+        raise RuntimeError(_format_http_error(exc.code, body)) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(_format_url_error(exc)) from exc
 
 
 BACKENDS = {"ntfy": _send_ntfy}
@@ -198,7 +247,9 @@ def send_notifications(rows, config=None):
             except Exception as exc:
                 last_error = exc
     if attempts and not successes:
-        raise RuntimeError(f"远程通知全部发送失败：{last_error}")
+        backend_count = len(backends)
+        plural = "" if backend_count == 1 else f"（{backend_count} 个后端均失败）"
+        raise RuntimeError(f"远程通知全部发送失败{plural}：{last_error}")
 
 
 def send_test(backend, config=None):
