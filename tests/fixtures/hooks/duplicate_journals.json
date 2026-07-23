@@ -1,0 +1,29 @@
+[
+  {
+    "name":"duplicate_ask_user_question",
+    "payloads":[
+      {"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},
+      {"session_id":"fixture-session","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","timestamp":"2026-01-10T10:00:01Z"},
+      {"session_id":"fixture-session","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","timestamp":"2026-01-10T10:00:01Z"}
+    ],
+    "expected":{"revision":2,"lifecycle":"active","turn_state":"needs_input","notification_keys":["fixture-session:2:needs_input"]}
+  },
+  {
+    "name":"duplicate_permission",
+    "payloads":[
+      {"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},
+      {"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"permission_prompt","timestamp":"2026-01-10T10:00:01Z"},
+      {"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"permission_prompt","timestamp":"2026-01-10T10:00:01Z"}
+    ],
+    "expected":{"revision":2,"lifecycle":"active","turn_state":"needs_input","notification_keys":["fixture-session:2:needs_input"]}
+  },
+  {
+    "name":"duplicate_stop",
+    "payloads":[
+      {"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},
+      {"session_id":"fixture-session","hook_event_name":"Stop","timestamp":"2026-01-10T10:00:01Z"},
+      {"session_id":"fixture-session","hook_event_name":"Stop","timestamp":"2026-01-10T10:00:01Z"}
+    ],
+    "expected":{"revision":2,"lifecycle":"active","turn_state":"waiting","notification_keys":["fixture-session:2:done"]}
+  }
+]

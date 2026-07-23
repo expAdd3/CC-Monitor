@@ -1,0 +1,87 @@
+[
+  {
+    "name": "session_start",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"SessionStart","cwd":"/fixture/project","transcript_path":"/fixture/session.jsonl","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"waiting","notifications":[]}
+  },
+  {
+    "name": "user_prompt_submit",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"SessionStart","timestamp":"2026-01-10T10:00:00Z"},{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:01Z"}],
+    "expected": {"lifecycle":"active","turn_state":"running","notifications":[]}
+  },
+  {
+    "name": "ask_user_question",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},{"session_id":"fixture-session","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","timestamp":"2026-01-10T10:00:01Z"}],
+    "expected": {"lifecycle":"active","turn_state":"needs_input","notifications":["needs_input"]}
+  },
+  {
+    "name": "pre_tool_use",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"PreToolUse","tool_name":"Read","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"running","notifications":[]}
+  },
+  {
+    "name": "post_tool_use",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"PostToolUse","tool_name":"Read","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"running","notifications":[]}
+  },
+  {
+    "name": "permission_prompt",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"permission_prompt","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"needs_input","notifications":["needs_input"]}
+  },
+  {
+    "name": "elicitation_dialog",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"elicitation_dialog","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"needs_input","notifications":["needs_input"]}
+  },
+  {
+    "name": "idle_prompt",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"idle_prompt","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"waiting","notifications":[]}
+  },
+  {
+    "name": "auth_success",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"auth_success","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"running","notifications":[]}
+  },
+  {
+    "name": "elicitation_complete",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"elicitation_complete","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"running","notifications":[]}
+  },
+  {
+    "name": "elicitation_response",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"elicitation_response","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"running","notifications":[]}
+  },
+  {
+    "name": "unknown_notification",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"fixture_future_type","timestamp":"2026-01-10T10:00:00Z"}],
+    "expected": {"lifecycle":"active","turn_state":"needs_input","notifications":["needs_input"]}
+  },
+  {
+    "name": "stop_after_unresolved_question",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},{"session_id":"fixture-session","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","timestamp":"2026-01-10T10:00:01Z"},{"session_id":"fixture-session","hook_event_name":"Stop","timestamp":"2026-01-10T10:00:02Z"}],
+    "expected": {"lifecycle":"active","turn_state":"needs_input","notifications":["needs_input"]}
+  },
+  {
+    "name": "stop_done",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},{"session_id":"fixture-session","hook_event_name":"Stop","timestamp":"2026-01-10T10:00:01Z"}],
+    "expected": {"lifecycle":"active","turn_state":"waiting","notifications":["done"]}
+  },
+  {
+    "name": "stop_after_resolved_intervention",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},{"session_id":"fixture-session","hook_event_name":"Notification","notification_type":"permission_prompt","timestamp":"2026-01-10T10:00:01Z"},{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:02Z"},{"session_id":"fixture-session","hook_event_name":"Stop","timestamp":"2026-01-10T10:00:03Z"}],
+    "expected": {"lifecycle":"active","turn_state":"waiting","notifications":["needs_input","done"]}
+  },
+  {
+    "name": "stop_failure",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},{"session_id":"fixture-session","hook_event_name":"StopFailure","timestamp":"2026-01-10T10:00:01Z"}],
+    "expected": {"lifecycle":"active","turn_state":"failed","notifications":["failed"]}
+  },
+  {
+    "name": "session_end",
+    "payloads": [{"session_id":"fixture-session","hook_event_name":"UserPromptSubmit","timestamp":"2026-01-10T10:00:00Z"},{"session_id":"fixture-session","hook_event_name":"SessionEnd","timestamp":"2026-01-10T10:00:01Z"}],
+    "expected": {"lifecycle":"ended","turn_state":"running","notifications":[]}
+  }
+]

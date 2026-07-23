@@ -1,0 +1,439 @@
+[
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "SessionStart",
+      "timestamp": "2026-01-10T10:00:00Z",
+      "cwd": "/fixture/project",
+      "transcript_path": "/fixture/session.jsonl",
+      "client_bundle_id": "com.fixture.Terminal"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "SessionStart",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "cwd": "/fixture/project",
+        "transcript_path": "/fixture/session.jsonl",
+        "client_bundle_id": "com.fixture.Terminal"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "UserPromptSubmit",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "UserPromptSubmit",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {},
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "AskUserQuestion",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "PreToolUse",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "tool_name": "AskUserQuestion"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Read",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "PreToolUse",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "tool_name": "Read"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Read",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "PostToolUse",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "tool_name": "Read"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Notification",
+      "notification_type": "permission_prompt",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Notification",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "notification_type": "permission_prompt"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Notification",
+      "notification_type": "elicitation_dialog",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Notification",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "notification_type": "elicitation_dialog"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Notification",
+      "notification_type": "idle_prompt",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Notification",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "notification_type": "idle_prompt"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Notification",
+      "notification_type": "auth_success",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Notification",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "notification_type": "auth_success"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Notification",
+      "notification_type": "elicitation_complete",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Notification",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "notification_type": "elicitation_complete"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Notification",
+      "notification_type": "elicitation_response",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Notification",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "notification_type": "elicitation_response"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Notification",
+      "notification_type": "fixture_future_type",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Notification",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {
+        "notification_type": "fixture_future_type"
+      },
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "Stop",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "Stop",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {},
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "StopFailure",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "StopFailure",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {},
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000001",
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "SessionEnd",
+      "timestamp": "2026-01-10T10:00:00Z"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000001",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "SessionEnd",
+      "occurred_at_ms": 1768039200000,
+      "received_at_ms": 1768039200000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000001",
+      "payload_version": 1,
+      "payload": {},
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000001"
+      ]
+    }
+  },
+  {
+    "ingestion_id": "018f0000-0000-7000-8000-000000000002",
+    "received_at_ms": 1768039205000,
+    "payload": {
+      "session_id": "fixture-session",
+      "hook_event_name": "UserPromptSubmit"
+    },
+    "expected": {
+      "id": "018f0000-0000-7000-8000-000000000002",
+      "agent": "claude",
+      "session_id": "fixture-session",
+      "source": "hook",
+      "source_event": "UserPromptSubmit",
+      "occurred_at_ms": 1768039205000,
+      "received_at_ms": 1768039205000,
+      "sequence": null,
+      "dedupe_key": "hook|018f0000-0000-7000-8000-000000000002",
+      "payload_version": 1,
+      "payload": {},
+      "identity_inputs": [
+        "hook",
+        "018f0000-0000-7000-8000-000000000002"
+      ]
+    }
+  }
+]

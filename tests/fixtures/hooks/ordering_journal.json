@@ -1,0 +1,15 @@
+{
+  "events": [
+    {"id":"fixture-order-5","agent":"claude","session_id":"fixture-order","source":"hook","source_event":"SessionEnd","occurred_at_ms":3000,"received_at_ms":3000,"sequence":null,"dedupe_key":"hook|fixture-order-5","payload_version":1,"payload":{},"identity_inputs":["hook","fixture-order-5"]},
+    {"id":"fixture-order-2","agent":"claude","session_id":"fixture-order","source":"hook","source_event":"UserPromptSubmit","occurred_at_ms":1000,"received_at_ms":1000,"sequence":null,"dedupe_key":"hook|fixture-order-2","payload_version":1,"payload":{},"identity_inputs":["hook","fixture-order-2"]},
+    {"id":"fixture-order-4","agent":"claude","session_id":"fixture-order","source":"hook","source_event":"Stop","occurred_at_ms":2000,"received_at_ms":2000,"sequence":null,"dedupe_key":"hook|fixture-order-4","payload_version":1,"payload":{},"identity_inputs":["hook","fixture-order-4"]},
+    {"id":"fixture-order-1","agent":"claude","session_id":"fixture-order","source":"transcript","source_event":"SessionStart","occurred_at_ms":1000,"received_at_ms":1000,"sequence":1,"dedupe_key":"transcript|fixture-order-1","payload_version":1,"payload":{},"identity_inputs":["transcript","fixture-order-1"]},
+    {"id":"fixture-order-3","agent":"claude","session_id":"fixture-order","source":"recovery","source_event":"Notification","occurred_at_ms":2000,"received_at_ms":2000,"sequence":1,"dedupe_key":"recovery|fixture-order-3","payload_version":1,"payload":{"notification_type":"permission_prompt"},"identity_inputs":["recovery","fixture-order-3"]},
+    {"id":"fixture-order-skew","agent":"claude","session_id":"fixture-order","source":"recovery","source_event":"PostToolUse","occurred_at_ms":999999999,"received_at_ms":1500,"sequence":1,"dedupe_key":"recovery|fixture-order-skew","payload_version":1,"payload":{"tool_name":"Read"},"identity_inputs":["recovery","fixture-order-skew"]}
+  ],
+  "expected":{
+    "ordered_ids":["fixture-order-1","fixture-order-2","fixture-order-skew","fixture-order-3","fixture-order-4","fixture-order-5"],
+    "projection":{"lifecycle":"ended","turn_state":"waiting","reason":"session_ended","source":"hook","confidence":"definitive","revision":6,"changed_at_ms":3000,"last_observed_at_ms":3000},
+    "notifications":["needs_input","done"]
+  }
+}

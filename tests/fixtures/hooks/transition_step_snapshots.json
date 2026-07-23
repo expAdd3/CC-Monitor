@@ -1,0 +1,19 @@
+{
+  "session_start":[{"lifecycle":"active","turn_state":"waiting","new_notifications":[]}],
+  "user_prompt_submit":[{"lifecycle":"active","turn_state":"waiting","new_notifications":[]},{"lifecycle":"active","turn_state":"running","new_notifications":[]}],
+  "ask_user_question":[{"lifecycle":"active","turn_state":"running","new_notifications":[]},{"lifecycle":"active","turn_state":"needs_input","new_notifications":["needs_input"]}],
+  "pre_tool_use":[{"lifecycle":"active","turn_state":"running","new_notifications":[]}],
+  "post_tool_use":[{"lifecycle":"active","turn_state":"running","new_notifications":[]}],
+  "permission_prompt":[{"lifecycle":"active","turn_state":"needs_input","new_notifications":["needs_input"]}],
+  "elicitation_dialog":[{"lifecycle":"active","turn_state":"needs_input","new_notifications":["needs_input"]}],
+  "idle_prompt":[{"lifecycle":"active","turn_state":"waiting","new_notifications":[]}],
+  "auth_success":[{"lifecycle":"active","turn_state":"running","new_notifications":[]}],
+  "elicitation_complete":[{"lifecycle":"active","turn_state":"running","new_notifications":[]}],
+  "elicitation_response":[{"lifecycle":"active","turn_state":"running","new_notifications":[]}],
+  "unknown_notification":[{"lifecycle":"active","turn_state":"needs_input","new_notifications":["needs_input"]}],
+  "stop_after_unresolved_question":[{"lifecycle":"active","turn_state":"running","new_notifications":[]},{"lifecycle":"active","turn_state":"needs_input","new_notifications":["needs_input"]},{"lifecycle":"active","turn_state":"needs_input","new_notifications":[]}],
+  "stop_done":[{"lifecycle":"active","turn_state":"running","new_notifications":[]},{"lifecycle":"active","turn_state":"waiting","new_notifications":["done"]}],
+  "stop_after_resolved_intervention":[{"lifecycle":"active","turn_state":"running","new_notifications":[]},{"lifecycle":"active","turn_state":"needs_input","new_notifications":["needs_input"]},{"lifecycle":"active","turn_state":"running","new_notifications":[]},{"lifecycle":"active","turn_state":"waiting","new_notifications":["done"]}],
+  "stop_failure":[{"lifecycle":"active","turn_state":"running","new_notifications":[]},{"lifecycle":"active","turn_state":"failed","new_notifications":["failed"]}],
+  "session_end":[{"lifecycle":"active","turn_state":"running","new_notifications":[]},{"lifecycle":"ended","turn_state":"running","new_notifications":[]}]
+}

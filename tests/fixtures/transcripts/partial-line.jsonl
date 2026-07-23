@@ -1,0 +1,2 @@
+{"type":"assistant","timestamp":"2026-01-12T00:00:00Z","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/fixture/document.txt"}}]}}
+{"type":"assistant","timestamp":"2026-01-12T00:00:01Z","message":{"content":[{"type":"text","text":"incomplete

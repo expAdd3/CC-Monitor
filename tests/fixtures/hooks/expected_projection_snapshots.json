@@ -1,0 +1,19 @@
+{
+  "session_start":{"lifecycle":"active","turn_state":"waiting","reason":"session_started","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "user_prompt_submit":{"lifecycle":"active","turn_state":"running","reason":"user_prompt_submitted","source":"hook","confidence":"definitive","revision":2,"changed_at_ms":1768039201000,"last_observed_at_ms":1768039201000},
+  "ask_user_question":{"lifecycle":"active","turn_state":"needs_input","reason":"ask_user_question","source":"hook","confidence":"definitive","revision":2,"changed_at_ms":1768039201000,"last_observed_at_ms":1768039201000},
+  "pre_tool_use":{"lifecycle":"active","turn_state":"running","reason":"tool_running","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "post_tool_use":{"lifecycle":"active","turn_state":"running","reason":"tool_running","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "permission_prompt":{"lifecycle":"active","turn_state":"needs_input","reason":"permission_prompt","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "elicitation_dialog":{"lifecycle":"active","turn_state":"needs_input","reason":"elicitation_dialog","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "idle_prompt":{"lifecycle":"active","turn_state":"waiting","reason":"idle_prompt","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "auth_success":{"lifecycle":"active","turn_state":"running","reason":"auth_success","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "elicitation_complete":{"lifecycle":"active","turn_state":"running","reason":"elicitation_complete","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "elicitation_response":{"lifecycle":"active","turn_state":"running","reason":"elicitation_response","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "unknown_notification":{"lifecycle":"active","turn_state":"needs_input","reason":"unknown_notification","source":"hook","confidence":"definitive","revision":1,"changed_at_ms":1768039200000,"last_observed_at_ms":1768039200000},
+  "stop_after_unresolved_question":{"lifecycle":"active","turn_state":"needs_input","reason":"ask_user_question","source":"hook","confidence":"definitive","revision":3,"changed_at_ms":1768039201000,"last_observed_at_ms":1768039202000},
+  "stop_done":{"lifecycle":"active","turn_state":"waiting","reason":"turn_stopped","source":"hook","confidence":"definitive","revision":2,"changed_at_ms":1768039201000,"last_observed_at_ms":1768039201000},
+  "stop_after_resolved_intervention":{"lifecycle":"active","turn_state":"waiting","reason":"turn_stopped","source":"hook","confidence":"definitive","revision":4,"changed_at_ms":1768039203000,"last_observed_at_ms":1768039203000},
+  "stop_failure":{"lifecycle":"active","turn_state":"failed","reason":"stop_failed","source":"hook","confidence":"definitive","revision":2,"changed_at_ms":1768039201000,"last_observed_at_ms":1768039201000},
+  "session_end":{"lifecycle":"ended","turn_state":"running","reason":"session_ended","source":"hook","confidence":"definitive","revision":2,"changed_at_ms":1768039201000,"last_observed_at_ms":1768039201000}
+}
