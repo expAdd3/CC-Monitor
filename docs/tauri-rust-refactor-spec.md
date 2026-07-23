@@ -174,6 +174,12 @@ Normalized Hook payloads retain only reducer/metadata fields when present:
 `client_bundle_id`. Raw tool input, transcript content, and unrelated Hook
 fields are not retained.
 
+The Claude transcript adapter emits the canonical reducer event names
+`TranscriptAssistantToolUse`, `TranscriptAssistantThinking`,
+`TranscriptToolResult`, and `TranscriptAssistantText`. The text event carries
+an `idle_ms` integer derived at observation time. These are domain inputs, not
+raw JSONL record names; the adapter remains responsible for classification.
+
 For deterministic replay, define `logical_at_ms` as `occurred_at_ms` only when
 it is positive and within ±24 hours of `received_at_ms`; otherwise use
 `received_at_ms`. Events are totally ordered by:
@@ -207,14 +213,27 @@ enum TurnState {
 }
 ```
 
-The projection also stores `reason`, `source`, `confidence`, `changed_at`, and
-`last_observed_at`. UI labels may change without changing these domain values.
+The projection is keyed by `(agent_kind, session_id)` and also stores
+`agent_kind`, `reason`, `source`, `confidence`, `changed_at`, and
+`last_observed_at`. A session identifier from one agent must never address the
+projection of another agent. UI labels may change without changing these
+domain values.
 
 ## 5. State transition table
 
 Hook evidence takes precedence over transcript inference while it is recent.
 Transcript evidence may recover a session with no usable Hook evidence, but
 must not overwrite a definitive recent Hook transition.
+
+“Recent” is frozen as the inclusive 120,000 ms interval after the logical
+timestamp of the latest usable Hook event. Transcript transitions at exactly
+120,000 ms are suppressed; those after 120,000 ms may infer state. A definitive
+Hook `NeedsInput` is stronger than this time window and remains sticky until a
+later Hook transition explicitly resolves it or `SessionEnd` occurs.
+`UserPromptSubmit`, non-question `PreToolUse`, `PostToolUse`, `auth_success`,
+`elicitation_complete`, `elicitation_response`, `StopFailure`, and a new
+`SessionStart` are resolving Hook transitions. `Stop`, `idle_prompt`, and
+Transcript evidence do not resolve a pending intervention.
 
 | Input | Guard / classification | Lifecycle | Turn state | Notification |
 |---|---|---|---|---|

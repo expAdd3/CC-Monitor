@@ -1,0 +1,10 @@
+[package]
+name = "cc-monitor-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cc-monitor-hook"
+path = "src/main.rs"

@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/monitor-domain",
+  "crates/monitor-storage",
+  "crates/adapter-claude",
+  "crates/monitor-engine",
+  "crates/monitor-notify",
+  "binaries/cc-monitor-hook",
+  "binaries/cc-monitor-cli",
+  "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

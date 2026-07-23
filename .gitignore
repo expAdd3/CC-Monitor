@@ -7,6 +7,9 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+node_modules/
+target/
+src-tauri/gen/
 
 # Virtual environments
 .venv/

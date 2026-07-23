@@ -1,0 +1,10 @@
+[package]
+name = "monitor-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+monitor-domain = { path = "../monitor-domain" }
+monitor-storage = { path = "../monitor-storage" }
