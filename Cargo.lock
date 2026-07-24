@@ -6,13 +6,18 @@ version = 4
 name = "adapter-claude"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "monitor-domain",
+ "monitor-storage",
  "serde",
  "serde_json",
+ "sha2",
  "shell-words",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.19",
  "time",
+ "tokio",
  "uuid",
 ]
 
@@ -410,8 +415,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -2093,6 +2100,7 @@ name = "monitor-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "monitor-domain",
  "serde_json",
  "sqlx",

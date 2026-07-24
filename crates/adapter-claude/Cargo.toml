@@ -6,13 +6,18 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 monitor-domain = { path = "../monitor-domain" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 shell-words.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+monitor-storage = { path = "../monitor-storage" }
+sqlx.workspace = true
 tempfile.workspace = true

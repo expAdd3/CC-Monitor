@@ -136,7 +136,8 @@ CREATE TABLE transcript_cursors (
     byte_offset         INTEGER NOT NULL DEFAULT 0 CHECK (byte_offset >= 0),
     file_size           INTEGER NOT NULL DEFAULT 0 CHECK (file_size >= 0),
     modified_at_ms      INTEGER,
-    partial_line        BLOB,
+    partial_line        BLOB, -- deprecated; application always stores NULL
+    content_anchor      TEXT,
     last_scanned_at_ms  INTEGER NOT NULL,
     last_error          TEXT
 ) STRICT;

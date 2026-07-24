@@ -175,6 +175,8 @@ product and distribution.
 
 ## Phase 4 — Transcript and pricing adapters
 
+Status: completed in the working tree; stop before Phase 5.
+
 ### Implement
 
 1. Discover Claude project transcripts and retain the `--` internal-directory
@@ -188,6 +190,10 @@ product and distribution.
    cross-main/subagent collapse, and persisted stable source locations.
 4. Port model normalization and bundled pricing; add SQLite UI overrides.
 5. Implement asynchronous all-history first indexing and progress reporting.
+   Adapter payloads use a synchronous Begin/Chunk/Commit bounded sink, and
+   progress uses a separate synchronous callback; no indexing queue retains
+   history. Phase 5 owns transactional persistence orchestration, projection,
+   and Outbox work.
 6. Build active projections only for the approved 24-hour visibility window.
 7. Guarantee initial indexing cannot enqueue notifications.
 

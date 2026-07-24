@@ -309,8 +309,30 @@ UserNotifications adapter. Exact terminal tab/pane navigation is out of scope.
 - Old sessions contribute to usage history but only sessions active in the
   previous 24 hours appear in the active list.
 - Store cursors and derived data; do not copy transcript contents into SQLite.
+  The legacy `partial_line` cursor column is deprecated and always remains
+  NULL: `byte_offset` points to an incomplete line's start so it is reread.
+- Transcript parsing is streaming and caps one logical line at 16 MiB.
+  Oversized lines are discarded incrementally without retaining their bodies.
+- Whole-history payloads are synchronously delivered to a caller sink in
+  chunks of at most 256 normalized event/usage records. The sink call provides
+  backpressure; production indexing has no payload queue. A chunk cursor is
+  eligible for persistence only when the sink commits that chunk successfully.
+  Phase 5 owns that transaction and all projection/Outbox orchestration.
+- Each file uses an explicit `Begin(reset, start_cursor) → Chunk* →
+  Commit(final_cursor)` protocol. Empty, malformed-only, oversized-only and
+  irrelevant-only files still deliver Begin and Commit. On reset, Phase 5 must
+  clear old derived rows transactionally before accepting replacement chunks.
+  Failure of any protocol item aborts that file and propagates to the task.
+- Index progress also uses a synchronous callback. Exactly one completion is
+  emitted after each attempted descriptor; only the last descriptor is marked
+  finished. A discovery failure emits one terminal progress item.
 - Tolerate malformed and partial lines, truncation, replacement, and files
   changing during a scan.
+- Cursor `content_anchor` is SHA-256 over the complete processed prefix.
+  Resume verifies that entire prefix, which is bounded-memory but O(prefix)
+  file I/O; a mismatch resets ingestion to byte zero.
+- Discovery rejects symbolic-link transcripts and canonical-path escapes from
+  the configured Claude projects root.
 - Include related `subagents/*.jsonl` usage.
 - Preserve current request/message deduplication behavior.
 - Usage identity always includes `agent_kind + session_id`. With both IDs, use
@@ -330,6 +352,8 @@ UserNotifications adapter. Exact terminal tab/pane navigation is out of scope.
   guessing.
 - The bundled price catalog is authoritative unless overridden through the UI.
   No runtime network price lookup is performed.
+- Catalog decimals are converted to pico-USD with checked decimal integer
+  arithmetic; monetary parsing and persistence never use binary floats.
 
 ## 8. Desktop behavior
 

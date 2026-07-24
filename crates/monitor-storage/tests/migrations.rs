@@ -41,5 +41,5 @@ async fn fresh_database_migrates_twice_and_has_required_pragmas() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(versions, 3);
+    assert_eq!(versions, 4);
 }
