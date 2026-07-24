@@ -1,0 +1,36 @@
+[tools]
+bun = "latest"
+"cargo:tauri-cli" = "latest"
+rust = "stable"
+
+
+[settings]
+experimental = true
+
+
+[tasks.dev]
+description = "Run Tauri development"
+run = "cargo tauri dev"
+
+
+[tasks.build]
+description = "Build desktop application"
+run = "cargo tauri build"
+
+
+[tasks.test]
+description = "Run all Rust workspace tests"
+run = "cargo test --workspace"
+
+
+[tasks.lint]
+description = "Run Rust lint for all targets"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.format]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.ui]
+description = "Build the React frontend"
+run = "bun run build"
