@@ -13,5 +13,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+adapter-claude = { path = "../crates/adapter-claude" }
 monitor-engine = { path = "../crates/monitor-engine" }
+monitor-storage = { path = "../crates/monitor-storage" }
+serde_json.workspace = true
+sqlx.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

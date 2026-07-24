@@ -8,3 +8,15 @@ rust-version.workspace = true
 [[bin]]
 name = "cc-monitor-hook"
 path = "src/main.rs"
+
+[dependencies]
+adapter-claude = { path = "../../crates/adapter-claude" }
+monitor-domain = { path = "../../crates/monitor-domain" }
+rusqlite.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+monitor-storage = { path = "../../crates/monitor-storage" }
+tempfile.workspace = true
+tokio.workspace = true

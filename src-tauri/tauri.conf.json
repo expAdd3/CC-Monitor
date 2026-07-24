@@ -25,6 +25,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "externalBin": ["binaries/cc-monitor-hook"],
     "icon": ["../assets/AppIcon.icns"],
     "macOS": {
       "minimumSystemVersion": "12.0"

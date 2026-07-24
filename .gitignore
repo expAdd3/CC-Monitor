@@ -10,6 +10,7 @@ dist/
 node_modules/
 target/
 src-tauri/gen/
+src-tauri/binaries/
 
 # Virtual environments
 .venv/

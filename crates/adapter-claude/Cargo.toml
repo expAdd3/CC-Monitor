@@ -7,3 +7,12 @@ rust-version.workspace = true
 
 [dependencies]
 monitor-domain = { path = "../monitor-domain" }
+serde.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

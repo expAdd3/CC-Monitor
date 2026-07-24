@@ -10,12 +10,12 @@ experimental = true
 
 [tasks.dev]
 description = "Run Tauri development"
-run = "cargo tauri dev"
+run = "./scripts/prepare-hook-sidecar.sh debug && cargo tauri dev"
 
 
 [tasks.build]
 description = "Build desktop application"
-run = "cargo tauri build"
+run = "./scripts/prepare-hook-sidecar.sh release && cargo tauri build"
 
 
 [tasks.test]

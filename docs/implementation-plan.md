@@ -128,6 +128,8 @@ are selected.
 
 ## Phase 3 — Claude Hook and installation
 
+Status: completed in the working tree; stop before Phase 4.
+
 ### Implement
 
 1. Implement bounded stdin ingestion and Claude payload normalization.
@@ -156,7 +158,10 @@ product and distribution.
 
 - Invalid, empty, oversized, and valid payload integration tests all exit 0.
 - Locked/missing/corrupt database tests exit within the allowed bound.
-- Repeated payloads create one raw event.
+- Retrying one invocation creates one raw event because it reuses its UUID.
+- Two separate invocations with identical payloads create two distinct raw
+  events. Semantic duplicate notification suppression belongs to the
+  reducer/Outbox, not raw ingestion.
 - Installer is idempotent and preserves unrelated settings.
 - Malformed settings fail safely without overwriting the file.
 - Uninstaller removes only the matching installation.

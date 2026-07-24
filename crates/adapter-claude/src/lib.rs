@@ -1,4 +1,4 @@
-//! Claude-specific adapters live here.
-//!
-//! Hook normalization and transcript parsing intentionally begin in later
-//! implementation phases.
+//! Claude-specific adapters that do not depend on Tauri.
+
+pub mod hook;
+pub mod install;

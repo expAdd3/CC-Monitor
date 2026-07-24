@@ -388,7 +388,9 @@ The normative schema is `docs/schema-v2.sql`.
 - SQLite uses WAL, foreign keys, `synchronous=NORMAL`, and a 5-second busy
   timeout.
 - Only the desktop application runs SQLx migrations.
-- The Hook and application use the same journal and timeout policy.
+- The desktop pool uses a 5-second busy timeout. The short-lived Hook instead
+  uses a 120 ms SQLite busy timeout with at most two retries after 20 ms and
+  40 ms, so contention cannot hold up Claude Code.
 - Raw events and successful notification history are retained for 30 days.
 - Session projections and daily usage aggregates are retained.
 - Transcript contents are not stored.
@@ -402,6 +404,11 @@ The normative schema is `docs/schema-v2.sql`.
 
 The Rust Hook is copied to the new application support directory. Its command
 contains the generated installation identifier and absolute new-database path.
+Hook stdin is capped at 256 KiB and must complete within 500 ms. The blocking
+read runs on a detached worker; deadline expiry lets the main process exit,
+which terminates the blocked reader. Invalid, empty, oversized, or timed-out
+input is dropped with a short sanitized diagnostic and a successful process
+exit.
 Installation:
 
 1. validates and backs up `~/.claude/settings.json`;
@@ -410,6 +417,12 @@ Installation:
 4. removes only recognized legacy CC-Monitor Hook commands;
 5. preserves all unrelated hooks;
 6. writes the new event registrations atomically.
+
+Atomic replacement preserves the exact Unix mode of an existing settings file;
+a newly created settings file is explicitly mode `0600`, independent of the
+process umask. The first backup has the same mode as its source and is never
+made broader. Replacement files are created by the same local user, preserving
+ownership implicitly.
 
 Uninstall removes only entries matching the installed path and installation
 identifier. The application never deletes the legacy database directory.
