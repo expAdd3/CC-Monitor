@@ -1,0 +1,18 @@
+{
+  "valid": [
+    "a",
+    "_private",
+    "-alerts",
+    "CC_Monitor-2026",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "invalid": [
+    "",
+    ".",
+    "team.alerts",
+    "has space",
+    "team/alerts",
+    "通知",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ]
+}

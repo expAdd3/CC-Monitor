@@ -1,8 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const PICO_PER_USD: i128 = 1_000_000_000_000;
-pub const TOKENS_PER_MILLION: i128 = 1_000_000;
+const PICO_PER_USD: i128 = 1_000_000_000_000;
+const TOKENS_PER_MILLION: i128 = 1_000_000;
+/// Transcript JSON is untrusted. Bound each component so one record's four
+/// token classes always fit in the signed SQLite representation and in a
+/// saturated per-record total.
+pub const MAX_TOKEN_COMPONENT: u64 = i64::MAX as u64 / 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
@@ -12,27 +16,18 @@ pub struct TokenUsage {
     pub cache_read: u64,
 }
 
-impl TokenUsage {
-    pub fn total(self) -> u64 {
-        self.input
-            .saturating_add(self.output)
-            .saturating_add(self.cache_write)
-            .saturating_add(self.cache_read)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Price {
-    pub input: i64,
-    pub output: i64,
-    pub cache_write: i64,
-    pub cache_read: i64,
+struct Price {
+    input: i64,
+    output: i64,
+    cache_write: i64,
+    cache_read: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Cost {
-    pub pico_usd: i64,
-    pub known: bool,
+pub(crate) struct Cost {
+    pub(crate) pico_usd: i64,
+    pub(crate) known: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -69,14 +64,7 @@ impl Default for PriceCatalog {
 }
 
 impl PriceCatalog {
-    pub fn with_overrides(mut self, overrides: impl IntoIterator<Item = (String, Price)>) -> Self {
-        for (model, price) in overrides {
-            self.prices.insert(normalize_model(&model, false), price);
-        }
-        self
-    }
-
-    pub fn price_for(&self, model: &str) -> Option<Price> {
+    fn price_for(&self, model: &str) -> Option<Price> {
         for candidate in [normalize_model(model, false), normalize_model(model, true)] {
             if let Some(price) = self.prices.get(&candidate) {
                 return Some(*price);
@@ -98,7 +86,7 @@ impl PriceCatalog {
         None
     }
 
-    pub fn cost(&self, usage: TokenUsage, model: &str) -> Cost {
+    pub(crate) fn cost(&self, usage: TokenUsage, model: &str) -> Cost {
         let Some(price) = self.price_for(model) else {
             return Cost {
                 pico_usd: 0,
@@ -118,15 +106,23 @@ impl PriceCatalog {
     }
 }
 
-pub fn extract_usage(value: &serde_json::Value) -> TokenUsage {
-    let n = |name: &str| value.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+pub(crate) fn extract_usage(value: &serde_json::Value) -> TokenUsage {
+    let n = |name: &str| {
+        value
+            .get(name)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .min(MAX_TOKEN_COMPONENT)
+    };
     let mut input = value
         .get("input_tokens")
         .and_then(|v| v.as_u64())
+        .map(|value| value.min(MAX_TOKEN_COMPONENT))
         .unwrap_or_else(|| n("prompt_tokens"));
     let output = value
         .get("output_tokens")
         .and_then(|v| v.as_u64())
+        .map(|value| value.min(MAX_TOKEN_COMPONENT))
         .unwrap_or_else(|| n("completion_tokens"));
     let cache_write = n("cache_creation_input_tokens");
     let mut cache_read = n("cache_read_input_tokens");
@@ -148,7 +144,7 @@ pub fn extract_usage(value: &serde_json::Value) -> TokenUsage {
 
 /// Parses non-negative decimal USD without binary floating point. More than 12
 /// fractional digits are rounded half-up to pico-USD; at most 18 are accepted.
-pub fn decimal_usd_to_pico(value: &str) -> Result<i64, &'static str> {
+fn decimal_usd_to_pico(value: &str) -> Result<i64, &'static str> {
     let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if whole.starts_with('-') || fraction.len() > 18 || whole.is_empty() {
         return Err("invalid decimal");
@@ -264,6 +260,33 @@ mod tests {
                 cache_write: 0,
                 cache_read: 40
             }
+        );
+    }
+
+    #[test]
+    fn bounds_untrusted_token_components_before_storage_projection() {
+        let usage = extract_usage(&json!({
+            "input_tokens": u64::MAX,
+            "output_tokens": u64::MAX,
+            "cache_creation_input_tokens": u64::MAX,
+            "cache_read_input_tokens": u64::MAX,
+        }));
+        assert_eq!(
+            usage,
+            TokenUsage {
+                input: MAX_TOKEN_COMPONENT,
+                output: MAX_TOKEN_COMPONENT,
+                cache_write: MAX_TOKEN_COMPONENT,
+                cache_read: MAX_TOKEN_COMPONENT,
+            }
+        );
+        assert_eq!(
+            usage
+                .input
+                .saturating_add(usage.output)
+                .saturating_add(usage.cache_write)
+                .saturating_add(usage.cache_read),
+            MAX_TOKEN_COMPONENT * 4
         );
     }
 

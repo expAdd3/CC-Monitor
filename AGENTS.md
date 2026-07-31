@@ -1,8 +1,8 @@
 # CC-Monitor development rules
 
-These rules apply to the Tauri + Rust rewrite.
+These rules apply to the Tauri + Rust application.
 
-- Treat `docs/tauri-rust-refactor-spec.md` as the product and architecture
+- Treat `docs/architecture.md` as the product and architecture
   contract. Update that document when an implementation decision changes.
 - The application must never delete or migrate the legacy
   `~/.cc-monitor/state.db`. Legacy cleanup is explicitly outside application
@@ -22,6 +22,6 @@ These rules apply to the Tauri + Rust rewrite.
 - Do not log transcript contents, ntfy credentials, authorization headers, or
   other secrets. The accepted plaintext credential storage is local SQLite
   only.
-- Every behavior ported from Python needs an automated contract test where
-  feasible. macOS tray, Dock, notification-click, and terminal activation
-  behavior additionally require manual verification.
+- Every product behavior needs an automated contract test where feasible.
+  macOS tray, Dock, notification-click, and terminal activation behavior
+  additionally require manual verification.

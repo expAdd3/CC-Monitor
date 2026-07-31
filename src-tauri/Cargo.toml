@@ -17,12 +17,61 @@ anyhow.workspace = true
 async-trait.workspace = true
 adapter-claude = { path = "../crates/adapter-claude" }
 monitor-engine = { path = "../crates/monitor-engine" }
+monitor-notify = { path = "../crates/monitor-notify" }
 monitor-storage = { path = "../crates/monitor-storage" }
+chrono.workspace = true
+futures-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tokio.workspace = true
 uuid.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+notify-rust = { version = "4.18.0", default-features = false, features = ["preview-macos-un"] }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSAttributedString",
+    "NSBezierPath",
+    "NSButton",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSFont",
+    "NSFontDescriptor",
+    "NSGraphics",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSParagraphStyle",
+    "NSResponder",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSStringDrawing",
+    "NSText",
+    "NSView",
+    "block2",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSAttributedString",
+    "NSArray",
+    "NSData",
+    "NSDictionary",
+    "NSObject",
+    "NSRange",
+    "NSString",
+] }
+tray-icon = { version = "0.24.1", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util", "time"] }

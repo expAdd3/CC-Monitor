@@ -22,4 +22,7 @@ target_path="$target_dir/cc-monitor-hook-$target_triple"
 
 mkdir -p "$target_dir"
 cp "$source_path" "$target_path"
-chmod 700 "$target_path"
+# The bundled helper contains no secrets. Read/execute permission for every
+# local account keeps an administrator-built application usable after it is
+# copied to a shared /Applications directory.
+chmod 755 "$target_path"

@@ -1,4 +1,6 @@
-use monitor_domain::{AgentEvent, AgentKind, EventId, EventSource, SessionId};
+use monitor_domain::{
+    trusted_event_time_ms, AgentEvent, AgentKind, EventId, EventSource, SessionId,
+};
 use serde_json::{Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -69,12 +71,10 @@ pub fn normalize_hook(
             }
         }
     }
-    let occurred_at_ms = source_timestamp_ms(object)
-        .filter(|timestamp| {
-            const WINDOW_MS: u64 = 24 * 60 * 60 * 1_000;
-            *timestamp > 0 && timestamp.abs_diff(received_at_ms) <= WINDOW_MS
-        })
-        .unwrap_or(received_at_ms);
+    let occurred_at_ms = trusted_event_time_ms(
+        source_timestamp_ms(object).unwrap_or(received_at_ms),
+        received_at_ms,
+    );
     let ingestion = ingestion_id.to_string();
     Ok(AgentEvent {
         id: EventId(ingestion.clone()),

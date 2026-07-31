@@ -1,6 +1,6 @@
 [tools]
 bun = "latest"
-"cargo:tauri-cli" = "latest"
+"cargo:tauri-cli" = "2.11.4"
 rust = "stable"
 
 
@@ -15,17 +15,21 @@ run = "./scripts/prepare-hook-sidecar.sh debug && cargo tauri dev"
 
 [tasks.build]
 description = "Build desktop application"
-run = "./scripts/prepare-hook-sidecar.sh release && cargo tauri build"
+run = "bun run bundle:mac"
+
+[tasks.verify]
+description = "Run the complete automated verification gate"
+run = "bun run verify"
 
 
 [tasks.test]
 description = "Run all Rust workspace tests"
-run = "cargo test --workspace"
+run = "cargo test --workspace --all-features --all-targets"
 
 
 [tasks.lint]
 description = "Run Rust lint for all targets"
-run = "cargo clippy --workspace --all-targets -- -D warnings"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 
 [tasks.format]
 description = "Check Rust formatting"

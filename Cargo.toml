@@ -7,7 +7,6 @@ members = [
   "crates/monitor-engine",
   "crates/monitor-notify",
   "binaries/cc-monitor-hook",
-  "binaries/cc-monitor-cli",
   "src-tauri",
 ]
 
@@ -20,10 +19,14 @@ rust-version = "1.88"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
+futures-util = "0.3"
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["compress"] }
 shell-words = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
@@ -32,3 +35,11 @@ thiserror = "2"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 uuid = { version = "1", features = ["v7"] }
+url = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

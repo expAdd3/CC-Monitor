@@ -2,7 +2,29 @@ use crate::{
     AgentEvent, Confidence, EventSource, NotificationEdge, NotificationKind, Reduction,
     SessionLifecycle, SessionProjection, StateReason, TurnState,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReducerCheckpoint {
+    projection: Option<SessionProjection>,
+    unresolved_question: bool,
+    hook_needs_input_sticky: bool,
+    latest_usable_hook_at_ms: Option<i64>,
+    terminal_notified: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointedReduction {
+    pub reduction: Reduction,
+    pub checkpoint: ReducerCheckpoint,
+}
+
+impl ReducerCheckpoint {
+    pub fn projection(&self) -> Option<&SessionProjection> {
+        self.projection.as_ref()
+    }
+}
 
 #[derive(Default)]
 struct ReducerState {
@@ -15,6 +37,36 @@ struct ReducerState {
 }
 
 pub fn reduce(events: impl IntoIterator<Item = AgentEvent>) -> Reduction {
+    reduce_inner(ReducerCheckpoint::default(), events, None).reduction
+}
+
+pub fn reduce_at(events: impl IntoIterator<Item = AgentEvent>, observed_now_ms: i64) -> Reduction {
+    reduce_inner(ReducerCheckpoint::default(), events, Some(observed_now_ms)).reduction
+}
+
+/// Resumes the same reducer state used by full replay. Callers may use this
+/// only when every supplied event sorts strictly after the checkpointed
+/// evidence; late evidence must discard the checkpoint and replay in full.
+pub fn reduce_from_checkpoint(
+    checkpoint: ReducerCheckpoint,
+    events: impl IntoIterator<Item = AgentEvent>,
+) -> CheckpointedReduction {
+    reduce_inner(checkpoint, events, None)
+}
+
+pub fn reduce_from_checkpoint_at(
+    checkpoint: ReducerCheckpoint,
+    events: impl IntoIterator<Item = AgentEvent>,
+    observed_now_ms: i64,
+) -> CheckpointedReduction {
+    reduce_inner(checkpoint, events, Some(observed_now_ms))
+}
+
+fn reduce_inner(
+    checkpoint: ReducerCheckpoint,
+    events: impl IntoIterator<Item = AgentEvent>,
+    observed_now_ms: Option<i64>,
+) -> CheckpointedReduction {
     let mut seen = HashSet::new();
     let mut events: Vec<_> = events
         .into_iter()
@@ -22,13 +74,40 @@ pub fn reduce(events: impl IntoIterator<Item = AgentEvent>) -> Reduction {
         .collect();
     events.sort_by(AgentEvent::replay_cmp);
 
-    let mut state = ReducerState::default();
+    let mut state = ReducerState {
+        projection: checkpoint.projection,
+        unresolved_question: checkpoint.unresolved_question,
+        hook_needs_input_sticky: checkpoint.hook_needs_input_sticky,
+        latest_usable_hook_at_ms: checkpoint.latest_usable_hook_at_ms,
+        terminal_notified: checkpoint.terminal_notified,
+        notifications: Vec::new(),
+    };
     for event in events {
         apply(&mut state, event);
     }
-    Reduction {
-        projection: state.projection,
-        notifications: state.notifications,
+    if let (Some(now), Some(projection)) = (observed_now_ms, state.projection.as_mut()) {
+        if projection.source == EventSource::Transcript
+            && projection.turn_state == TurnState::Running
+            && now.saturating_sub(projection.last_observed_at_ms) > 30_000
+        {
+            projection.turn_state = TurnState::Waiting;
+            projection.reason = StateReason::TranscriptIdle;
+            projection.changed_at_ms = projection.last_observed_at_ms.saturating_add(30_001);
+        }
+    }
+    let checkpoint = ReducerCheckpoint {
+        projection: state.projection.clone(),
+        unresolved_question: state.unresolved_question,
+        hook_needs_input_sticky: state.hook_needs_input_sticky,
+        latest_usable_hook_at_ms: state.latest_usable_hook_at_ms,
+        terminal_notified: state.terminal_notified,
+    };
+    CheckpointedReduction {
+        reduction: Reduction {
+            projection: state.projection,
+            notifications: state.notifications,
+        },
+        checkpoint,
     }
 }
 
@@ -96,7 +175,7 @@ fn apply(state: &mut ReducerState, event: AgentEvent) {
             lifecycle = SessionLifecycle::Active;
             if payload_str(&event, "tool_name") == Some("AskUserQuestion") {
                 if turn_state != TurnState::NeedsInput {
-                    push_notification(state, NotificationKind::NeedsInput);
+                    push_notification(state, NotificationKind::NeedsInput, &event);
                 }
                 turn_state = TurnState::NeedsInput;
                 reason = StateReason::AskUserQuestion;
@@ -149,7 +228,7 @@ fn apply(state: &mut ReducerState, event: AgentEvent) {
                 }
                 kind => {
                     if turn_state != TurnState::NeedsInput {
-                        push_notification(state, NotificationKind::NeedsInput);
+                        push_notification(state, NotificationKind::NeedsInput, &event);
                     }
                     turn_state = TurnState::NeedsInput;
                     reason = match kind {
@@ -168,7 +247,7 @@ fn apply(state: &mut ReducerState, event: AgentEvent) {
                 turn_state = TurnState::Waiting;
                 reason = StateReason::TurnStopped;
                 if !state.terminal_notified {
-                    push_notification(state, NotificationKind::Done);
+                    push_notification(state, NotificationKind::Done, &event);
                     state.terminal_notified = true;
                 }
             }
@@ -179,7 +258,7 @@ fn apply(state: &mut ReducerState, event: AgentEvent) {
             state.unresolved_question = false;
             state.hook_needs_input_sticky = false;
             if !state.terminal_notified {
-                push_notification(state, NotificationKind::Failed);
+                push_notification(state, NotificationKind::Failed, &event);
                 state.terminal_notified = true;
             }
         }
@@ -266,9 +345,10 @@ fn payload_str<'a>(event: &'a AgentEvent, key: &str) -> Option<&'a str> {
     event.payload.get(key).and_then(|value| value.as_str())
 }
 
-fn push_notification(state: &mut ReducerState, kind: NotificationKind) {
+fn push_notification(state: &mut ReducerState, kind: NotificationKind, event: &AgentEvent) {
     state.notifications.push(NotificationEdge {
         kind,
         projection_revision: 0,
+        triggering_event_id: event.id.clone(),
     });
 }

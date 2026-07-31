@@ -1,76 +1,57 @@
+use monitor_domain::{AgentEvent, AgentKind, EventId, EventSource, SessionId};
 use monitor_storage::{
-    connect, delete_price_override, list_price_overrides, load_cursor, migrate, put_price_override,
-    replace_session_usage, save_cursor, PriceOverride, StoredCursor, StoredUsage,
+    connect, load_cursor, migrate, remove_missing_transcripts, TranscriptCursorPosition,
+    TranscriptIngestRepository,
 };
-use sqlx::Row;
-use tempfile::tempdir;
+use serde_json::json;
+use std::collections::BTreeSet;
+
+fn event(id: &str, session: &str) -> AgentEvent {
+    AgentEvent {
+        id: EventId(id.into()),
+        agent_kind: AgentKind::claude(),
+        session_id: SessionId(session.into()),
+        source: EventSource::Transcript,
+        source_event: "TranscriptAssistantText".into(),
+        occurred_at_ms: 1,
+        received_at_ms: 1,
+        sequence_no: None,
+        dedupe_key: id.into(),
+        payload_version: 1,
+        payload: json!({}),
+    }
+}
 
 #[tokio::test]
-async fn cursor_usage_reindex_and_price_overrides_are_durable() {
-    let temp = tempdir().unwrap();
-    let pool = connect(&temp.path().join("state.db")).await.unwrap();
+async fn commit_advances_cursor_and_missing_file_removal_returns_affected_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = connect(&directory.path().join("state.db")).await.unwrap();
     migrate(&pool).await.unwrap();
-
-    let cursor = StoredCursor {
-        transcript_path: "/fixture/session.jsonl".into(),
-        file_identity: Some("1:2".into()),
+    let path = "/tmp/session.jsonl";
+    let cursor = TranscriptCursorPosition {
         byte_offset: 42,
-        file_size: 48,
-        modified_at_ms: Some(100),
+        file_size: 42,
         content_anchor: Some("anchor".into()),
-        last_scanned_at_ms: 200,
-        last_error: None,
+        ..TranscriptCursorPosition::default()
     };
-    save_cursor(&pool, &cursor).await.unwrap();
+    let mut repository = TranscriptIngestRepository::new(pool.clone());
+    repository
+        .begin(path.into(), "session".into(), true, false, &cursor, 1)
+        .await
+        .unwrap();
+    repository
+        .chunk(vec![event("event", "session")], Vec::new(), &cursor, 1)
+        .await
+        .unwrap();
+    repository.commit(&cursor, 1).await.unwrap();
     assert_eq!(
-        load_cursor(&pool, &cursor.transcript_path).await.unwrap(),
-        Some(cursor)
+        load_cursor(&pool, path).await.unwrap().unwrap().byte_offset,
+        42
     );
 
-    let usage = StoredUsage {
-        id: "usage-1".into(),
-        session_id: "session".into(),
-        transcript_path: "/fixture/session.jsonl".into(),
-        source_location: "main@1:2:0".into(),
-        request_id: Some("request".into()),
-        message_id: Some("message".into()),
-        model_id: "claude-sonnet-4-5-20250929".into(),
-        local_day: "2026-01-10".into(),
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_write_tokens: 20,
-        cache_read_tokens: 30,
-        cost_pico_usd: 1_134_000_000,
-        cost_known: true,
-        dedupe_key: "claude:session:mr:message:request".into(),
-        observed_at_ms: 100,
-    };
-    replace_session_usage(&pool, "session", std::slice::from_ref(&usage), 300)
+    let affected = remove_missing_transcripts(&pool, &BTreeSet::new())
         .await
         .unwrap();
-    replace_session_usage(&pool, "session", &[usage], 301)
-        .await
-        .unwrap();
-    let row = sqlx::query(
-        "SELECT COUNT(*),SUM(input_tokens),SUM(cost_pico_usd) FROM daily_usage WHERE session_id='session'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(row.get::<i64, _>(0), 1);
-    assert_eq!(row.get::<i64, _>(1), 100);
-    assert_eq!(row.get::<i64, _>(2), 1_134_000_000);
-
-    let price = PriceOverride {
-        model_id: "custom".into(),
-        input: 1,
-        output: 2,
-        cache_write: 3,
-        cache_read: 4,
-        updated_at_ms: 5,
-    };
-    put_price_override(&pool, &price).await.unwrap();
-    assert_eq!(list_price_overrides(&pool).await.unwrap(), vec![price]);
-    delete_price_override(&pool, "custom").await.unwrap();
-    assert!(list_price_overrides(&pool).await.unwrap().is_empty());
+    assert_eq!(affected, vec!["session"]);
+    assert!(load_cursor(&pool, path).await.unwrap().is_none());
 }

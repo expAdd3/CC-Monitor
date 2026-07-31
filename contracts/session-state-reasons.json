@@ -1,0 +1,28 @@
+[
+  { "code": "session_started", "label": "会话已开始", "produced": true },
+  { "code": "user_prompt_submitted", "label": "正在处理新消息", "produced": true },
+  { "code": "ask_user_question", "label": "等待用户回答", "produced": true },
+  { "code": "tool_running", "label": "正在执行工具", "produced": true },
+  { "code": "permission_prompt", "label": "等待权限确认", "produced": true },
+  { "code": "elicitation_dialog", "label": "等待用户输入", "produced": true },
+  { "code": "idle_prompt", "label": "等待后续操作", "produced": true },
+  { "code": "auth_success", "label": "授权已完成", "produced": true },
+  { "code": "elicitation_complete", "label": "用户输入已完成", "produced": true },
+  { "code": "elicitation_response", "label": "已收到用户输入", "produced": true },
+  { "code": "unknown_notification", "label": "等待用户处理", "produced": true },
+  { "code": "turn_stopped", "label": "本轮已完成", "produced": true },
+  { "code": "stop_failed", "label": "执行失败", "produced": true },
+  { "code": "session_ended", "label": "会话已结束", "produced": true },
+  { "code": "transcript_tool_use", "label": "正在执行工具", "produced": true },
+  { "code": "transcript_thinking", "label": "正在思考", "produced": true },
+  { "code": "transcript_tool_result", "label": "正在处理工具结果", "produced": true },
+  { "code": "transcript_active", "label": "会话记录有新活动", "produced": true },
+  { "code": "transcript_idle", "label": "等待新活动", "produced": true },
+  { "code": "recovery", "label": "已恢复会话状态", "produced": true },
+  { "code": "unknown", "label": "状态原因未知", "produced": true },
+
+  { "code": "stop", "label": "本轮已完成", "produced": false },
+  { "code": "transcript_activity", "label": "会话记录有新活动", "produced": false },
+  { "code": "transcript_stale", "label": "等待新活动", "produced": false },
+  { "code": "recovered", "label": "已恢复会话状态", "produced": false }
+]
