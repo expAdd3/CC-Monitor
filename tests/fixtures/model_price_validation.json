@@ -1,0 +1,28 @@
+{
+  "validRates": [
+    { "value": "0", "picoUsd": "0" },
+    { "value": "1", "picoUsd": "1000000000000" },
+    { "value": "001.25", "picoUsd": "1250000000000" },
+    { "value": "1.0000000000005", "picoUsd": "1000000000001" },
+    { "value": "9223372.036854775807", "picoUsd": "9223372036854775807" }
+  ],
+  "invalidRates": [
+    "",
+    "-1",
+    "+1",
+    ".5",
+    "1.",
+    "1e3",
+    "1.2.3",
+    "1.1234567890123456789"
+  ],
+  "outOfRangeRates": [
+    "9223372.036854775808",
+    "9223372036854775808"
+  ],
+  "canonicalModels": [
+    { "value": " GPT_5.6_SOL:beta ", "canonical": "gpt-5-6-sol" },
+    { "value": "claude@@sonnet__4.5[1m]", "canonical": "claude-sonnet-4-5" },
+    { "value": " 模型_α ", "canonical": "模型-α" }
+  ]
+}

@@ -1,99 +1,36 @@
-use monitor_storage::{connect, migrate, BUSY_TIMEOUT, MIGRATOR, SUPPORTED_SCHEMA_VERSION};
-use sqlx::Row;
-use std::borrow::Cow;
-
-fn migrator_through(version: i64) -> sqlx::migrate::Migrator {
-    sqlx::migrate::Migrator {
-        migrations: Cow::Owned(
-            MIGRATOR
-                .iter()
-                .take_while(|migration| migration.version <= version)
-                .cloned()
-                .collect(),
-        ),
-        ignore_missing: false,
-        locking: true,
-        no_tx: false,
-    }
-}
+use monitor_storage::{
+    connect, connect_options, migrate, BUSY_TIMEOUT, MIGRATOR, SUPPORTED_SCHEMA_VERSION,
+};
+use sqlx::{sqlite::SqlitePoolOptions, Row};
 
 fn checksum_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[test]
-fn shipped_v1_through_v13_migration_bytes_are_frozen() {
-    let expected = [
-        (
-            1,
-            "ac43e25161ca8f0e13907c9cfe8282a40d484a675444058a1c9461caa88cab7073e4077d6354eb3a88552d822337be84",
-        ),
-        (
-            2,
-            "467af9ad1994be32f2cd9ed0f7b6bf32aca82090e9419b4cb179b271aebb45f6499334209ee59d642857f65372143b08",
-        ),
-        (
-            3,
-            "456a4c089680231d0dee826a89e5c3ca8a52c2d11738e9fc1dfd293e7f39a42b72f415b3a44a3ba89bafd9fa21dfc120",
-        ),
-        (
-            4,
-            "787c95b36a9054d58bfbb1ee1adc910d7b56166f5c1309a6fcd5db05b6a24fe794ad85abb8a316c1b523855a5c723667",
-        ),
-        (
-            5,
-            "710cf36e70ad8df3106c31f0ed618a02a77f26e60ec0a96e62403044dc67b01681fb566ad9c671198fc2e0c776631412",
-        ),
-        (
-            6,
-            "bc33b8aa9e8ce68d441365b382ee13e543878f10850cd9f72bd997b01d638d214c4c30d613935e9b758fac50403d1590",
-        ),
-        (
-            7,
-            "01c2a2ac5b374a0681321da1a06720f79bcbf86970453ed1c39683cc063fd3ac78c4ea05184f51e0b6c311e5c4660cb3",
-        ),
-        (
-            8,
-            "fea9797745ee87aa4d867c2c7ccbcc74104e6ecd6dabbac4de2baf63f6520a14673c843991817eeb7824393e1cb558b0",
-        ),
-        (
-            9,
-            "2ce7c5b9913cadec7f8606eca26d6627fdcaf1205446596caf7a02d0f1af3d1c0d566a8f063a4a52cc67b5028a06276d",
-        ),
-        (
-            10,
-            "30effa7d49ebdad845bb843a84b47553bc361c096e85b620ce0bfd67ee973e9c56e0d4ac328c85874ecb8ee460650c03",
-        ),
-        (
-            11,
-            "dfd4de5420707d824a60b5a3fec3c36f460a7aeea4228236f081433bacbd1abdc2c2228e8104b6c32f3a9a5b36cba9b4",
-        ),
-        (
-            12,
-            "390e74b582228c7e3e0e106554b614354b4b8957a3277e757120a1676e1d5725fa40370deae1a87629ad3126e9e007c6",
-        ),
-        (
-            13,
-            "ceb9677c60e2d02908209f598f1cf080e785a9f317f81e56ac512bda4715019d85404e5fdc75c77d9eb42e25aa97b371",
-        ),
-    ];
-
-    let actual: Vec<_> = MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version <= SUPPORTED_SCHEMA_VERSION)
-        .map(|migration| (migration.version, checksum_hex(&migration.checksum)))
-        .collect();
+fn shipped_migration_bytes_are_frozen() {
+    assert_eq!(SUPPORTED_SCHEMA_VERSION, 2);
+    let migrations = MIGRATOR.iter().collect::<Vec<_>>();
+    assert_eq!(migrations.len(), 2);
+    assert_eq!(migrations[0].version, 1);
+    assert_eq!(migrations[1].version, 2);
     assert_eq!(
-        actual,
-        expected
-            .into_iter()
-            .map(|(version, checksum)| (version, checksum.to_owned()))
-            .collect::<Vec<_>>()
+        checksum_hex(&migrations[0].checksum),
+        "c5910a96b5ec199b89e503cdfd119f2531b72c4f38ada2fceec18beb2127fb67dc93b42e83bc91a63543e2a58343ef68"
     );
+    assert_eq!(
+        checksum_hex(&migrations[1].checksum),
+        "1f2fb54e6df19541dd7a2399e9e64f2fdfd77eccb839a1ca267298c7046d320d5ce07b4c6024dc706bc9fe7e48b3d18e"
+    );
+    let reference = include_str!("../../../docs/schema-v1.sql");
+    let (_, reference_schema) = reference
+        .split_once("PRAGMA foreign_keys = ON;\n\n")
+        .expect("schema reference keeps its documented preamble");
+    assert_eq!(migrations[0].sql.as_ref(), reference_schema);
 }
 
 #[tokio::test]
-async fn fresh_database_migrates_twice_to_v13_with_required_pragmas() {
+async fn fresh_database_migrates_twice_to_v2_with_required_pragmas() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("state.db");
     let pool = connect(&database).await.unwrap();
@@ -102,27 +39,33 @@ async fn fresh_database_migrates_twice_to_v13_with_required_pragmas() {
     migrate(&pool).await.unwrap();
 
     assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations WHERE success=1"
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COALESCE(MAX(version),0),COUNT(*)
+               FROM _sqlx_migrations WHERE success=1"
         )
         .fetch_one(&pool)
         .await
         .unwrap(),
-        SUPPORTED_SCHEMA_VERSION
+        (2, 2)
     );
     for table in [
         "raw_events",
         "session_projection",
         "turns",
         "usage_records",
-        "daily_usage",
         "transcript_cursors",
         "notification_outbox",
+        "settings",
+        "price_overrides",
+        "installation",
         "notification_provider_health",
         "transcript_event_stage",
         "transcript_usage_stage",
-        "transcript_publish_generation",
         "background_task_health",
+        "usage_session_aggregates",
+        "usage_model_aggregates",
+        "usage_daily_aggregates",
+        "usage_aggregate_state",
     ] {
         assert_eq!(
             sqlx::query_scalar::<_, i64>(
@@ -133,9 +76,31 @@ async fn fresh_database_migrates_twice_to_v13_with_required_pragmas() {
             .await
             .unwrap(),
             1,
-            "missing v13 table {table}"
+            "missing required table {table}"
         );
     }
+    for obsolete in ["daily_usage", "transcript_publish_generation"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1"
+            )
+            .bind(obsolete)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0,
+            "pre-release compatibility table must not enter the supported schema: {obsolete}"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT is_current FROM usage_aggregate_state WHERE singleton=1"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1,
+    );
 
     let row = sqlx::query(
         "SELECT
@@ -157,68 +122,211 @@ async fn fresh_database_migrates_twice_to_v13_with_required_pragmas() {
 }
 
 #[tokio::test]
-async fn version_nine_upgrades_staging_lifecycle_through_v13() {
+async fn existing_v1_database_upgrades_and_backfills_usage_aggregates() {
     let directory = tempfile::tempdir().unwrap();
     let pool = connect(&directory.path().join("state.db")).await.unwrap();
-    migrator_through(9).run(&pool).await.unwrap();
-
-    migrate(&pool).await.unwrap();
-    let columns: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('transcript_usage_stage')
-         WHERE name IN ('staged_at_ms','is_sidechain','final_message')",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(columns, 3);
-}
-
-#[tokio::test]
-async fn version_ten_upgrades_publish_generation_through_v13() {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = connect(&directory.path().join("state.db")).await.unwrap();
-    migrator_through(10).run(&pool).await.unwrap();
-
-    migrate(&pool).await.unwrap();
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM sqlite_schema
-             WHERE (type='table' AND name='transcript_publish_generation')
-                OR (type='index' AND name IN (
-                    'idx_transcript_event_stage_cleanup',
-                    'idx_transcript_usage_stage_cleanup'))"
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap(),
-        3
-    );
-}
-
-#[tokio::test]
-async fn version_twelve_expands_background_health_without_data_loss() {
-    let directory = tempfile::tempdir().unwrap();
-    let pool = connect(&directory.path().join("state.db")).await.unwrap();
-    migrator_through(12).run(&pool).await.unwrap();
+    MIGRATOR.run_to(1, &pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO background_task_health (
-            task,success_count,failure_count,consecutive_failures,
-            last_error_code,last_succeeded_at_ms
-         ) VALUES ('incremental_index',4,2,0,NULL,10)",
+        "INSERT INTO usage_records (
+            id,agent_kind,session_id,transcript_path,source_location,
+            model_id,local_day,input_tokens,output_tokens,cache_write_tokens,
+            cache_read_tokens,cost_pico_usd,cost_known,dedupe_key,observed_at_ms
+         ) VALUES (
+            'usage','claude','session','/tmp/session.jsonl','line:1',
+            'model','2026-08-14',10,20,30,40,50,1,'usage',1
+         )",
     )
     .execute(&pool)
     .await
     .unwrap();
 
     migrate(&pool).await.unwrap();
+
     assert_eq!(
-        sqlx::query_as::<_, (i64, i64, Option<i64>)>(
-            "SELECT success_count,failure_count,last_transition_at_ms
-               FROM background_task_health WHERE task='incremental_index'"
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            "SELECT input_tokens,output_tokens,cost_pico_usd
+               FROM usage_session_aggregates
+              WHERE agent_kind='claude' AND session_id='session'",
         )
         .fetch_one(&pool)
         .await
         .unwrap(),
-        (4, 2, None)
+        (10, 20, 50),
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(version),0) FROM _sqlx_migrations WHERE success=1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        2,
+    );
+}
+
+#[tokio::test]
+async fn incomplete_usage_aggregate_backfill_is_repaired_with_saturating_totals() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("state.db");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(connect_options(&database))
+        .await
+        .unwrap();
+    migrate(&pool).await.unwrap();
+    for (id, known) in [("priced", true), ("unpriced", false)] {
+        sqlx::query(
+            "INSERT INTO usage_records (
+                id,agent_kind,session_id,transcript_path,source_location,
+                model_id,local_day,input_tokens,output_tokens,
+                cache_write_tokens,cache_read_tokens,cost_pico_usd,
+                cost_known,dedupe_key,observed_at_ms
+             ) VALUES (?1,'claude','session','/tmp/session.jsonl',?1,
+                'model','2026-08-14',?2,0,0,0,?2,?3,?1,1)",
+        )
+        .bind(id)
+        .bind(i64::MAX - 10)
+        .bind(known)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "WITH RECURSIVE sequence(value) AS (
+             SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<513
+         )
+         INSERT INTO usage_records (
+            id,agent_kind,session_id,transcript_path,source_location,
+            model_id,local_day,input_tokens,output_tokens,cache_write_tokens,
+            cache_read_tokens,cost_pico_usd,cost_known,dedupe_key,observed_at_ms
+         )
+         SELECT printf('paged-%04d',value),'claude','paged-session',
+                '/tmp/paged.jsonl',printf('paged:%d',value),'paged-model',
+                '2026-08-13',1,0,0,0,1,1,printf('paged-key-%04d',value),value
+           FROM sequence",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE usage_aggregate_state SET is_current=0 WHERE singleton=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    migrate(&pool).await.unwrap();
+
+    macro_rules! assert_backfilled {
+        ($table:literal, $filter:literal) => {
+            assert_eq!(
+                sqlx::query_as::<_, (i64, i64, i64, i64)>(concat!(
+                    "SELECT input_tokens,cost_pico_usd,cost_known,unpriced_tokens FROM ",
+                    $table,
+                    " WHERE ",
+                    $filter
+                ))
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+                (i64::MAX, i64::MAX, 0, i64::MAX - 10),
+                "backfill mismatch for {}",
+                $table,
+            );
+        };
+    }
+    assert_backfilled!("usage_session_aggregates", "session_id='session'");
+    assert_backfilled!("usage_model_aggregates", "session_id='session'");
+    assert_backfilled!("usage_daily_aggregates", "local_day='2026-08-14'");
+    for query in [
+        "SELECT input_tokens FROM usage_session_aggregates WHERE session_id='paged-session'",
+        "SELECT input_tokens FROM usage_model_aggregates WHERE session_id='paged-session'",
+        "SELECT input_tokens FROM usage_daily_aggregates WHERE local_day='2026-08-13'",
+    ] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(query)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            513,
+        );
+    }
+}
+
+#[tokio::test]
+async fn initial_schema_contains_every_current_lifecycle_field() {
+    let directory = tempfile::tempdir().unwrap();
+    let pool = connect(&directory.path().join("state.db")).await.unwrap();
+    migrate(&pool).await.unwrap();
+
+    for (table, columns) in [
+        (
+            "raw_events",
+            &["transcript_path", "notifications_allowed"][..],
+        ),
+        ("usage_records", &["is_sidechain", "final_message"][..]),
+        ("transcript_cursors", &["content_anchor"][..]),
+        ("transcript_event_stage", &["staged_at_ms"][..]),
+        (
+            "transcript_usage_stage",
+            &["staged_at_ms", "is_sidechain", "final_message"][..],
+        ),
+        ("price_overrides", &["disabled"][..]),
+        ("background_task_health", &["last_transition_at_ms"][..]),
+    ] {
+        for column in columns {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2"
+                )
+                .bind(table)
+                .bind(column)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+                1,
+                "missing {table}.{column}"
+            );
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO price_overrides(
+            model_id,input_pico_usd_per_million,output_pico_usd_per_million,
+            cache_write_pico_usd_per_million,cache_read_pico_usd_per_million,updated_at_ms
+         ) VALUES('model',11,22,33,44,55)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT disabled FROM price_overrides WHERE model_id='model'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    for task in [
+        "incremental_index",
+        "engine_processing",
+        "engine_reconciliation",
+        "startup_reconciliation",
+        "retention_cleanup",
+    ] {
+        sqlx::query("INSERT INTO background_task_health(task) VALUES(?1)")
+            .bind(task)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_list
+              WHERE schema='main' AND name NOT LIKE 'sqlite_%'
+                AND name!='_sqlx_migrations' AND strict=0"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
     );
 }

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+
+const NTFY_TEST_BODY: &str = "测试消息已提交，请检查接收设备是否收到。";
 use tauri_plugin_autostart::ManagerExt as _;
 
 const SETTINGS_AUTOSTART_FAILED: &str = "settings_autostart_failed";
@@ -12,10 +14,8 @@ const SETTINGS_INCONSISTENT: &str = "settings_inconsistent";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SettingsDto {
+pub(crate) struct SettingsDto {
     pub(super) ntfy_enabled: bool,
-    #[serde(default)]
-    pub(super) ntfy_activation_pending: bool,
     pub(super) ntfy_server: String,
     pub(super) ntfy_topic: String,
     pub(super) ntfy_username: String,
@@ -68,7 +68,6 @@ pub(super) async fn get_settings(
         .as_ref()
         .is_some_and(|value| !value.is_empty());
     settings.ntfy_password = None;
-    settings.ntfy_activation_pending = false;
     Ok(settings)
 }
 
@@ -76,12 +75,12 @@ pub(super) async fn save_settings(
     app: AppHandle,
     settings: SettingsDto,
     state: State<'_, Arc<DesktopState>>,
-) -> Result<(), String> {
+) -> Result<SettingsDto, String> {
     validate_settings(&settings)?;
     let store = SqliteSettingsStore {
         pool: state.pool.clone(),
     };
-    save_settings_consistently(
+    let mut saved = save_settings_consistently(
         &store,
         &TauriAutostart { app: app.clone() },
         &state.providers,
@@ -91,7 +90,12 @@ pub(super) async fn save_settings(
     .await
     .map_err(SettingsSaveError::code)?;
     state.invalidate(&app);
-    Ok(())
+    saved.ntfy_password_set = saved
+        .ntfy_password
+        .as_ref()
+        .is_some_and(|value| !value.is_empty());
+    saved.ntfy_password = None;
+    Ok(saved)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,7 +171,7 @@ async fn save_settings_consistently(
     providers: &tokio::sync::RwLock<NotificationPolicy>,
     mut desired: SettingsDto,
     updated_at_ms: i64,
-) -> Result<(), SettingsSaveError> {
+) -> Result<SettingsDto, SettingsSaveError> {
     let previous = store.load().await.map_err(|_| SettingsSaveError::Storage)?;
     let previous_autostart = autostart
         .is_enabled()
@@ -187,6 +191,10 @@ async fn save_settings_consistently(
             .set_enabled(desired.autostart)
             .map_err(|_| SettingsSaveError::Autostart)?;
     }
+    // Provider readers cover projection and delivery work. Taking the writer
+    // before persistence makes the durable settings/suppression transaction
+    // and the in-memory policy switch one observable operation to workers.
+    let mut provider_policy = providers.write().await;
     if store.persist(&desired, updated_at_ms).await.is_err() {
         if desired.autostart != previous_autostart
             && autostart.set_enabled(previous_autostart).is_err()
@@ -195,8 +203,8 @@ async fn save_settings_consistently(
         }
         return Err(SettingsSaveError::Storage);
     }
-    *providers.write().await = next_policy;
-    Ok(())
+    *provider_policy = next_policy;
+    Ok(desired)
 }
 
 pub(super) async fn test_ntfy(
@@ -217,7 +225,7 @@ pub(super) async fn test_ntfy(
         .map_err(|error| error.code().to_owned())?
         .send(&Notification {
             title: "CC Monitor 测试通知".to_owned(),
-            body: "ntfy 通知配置有效，可以正常接收消息。".to_owned(),
+            body: NTFY_TEST_BODY.to_owned(),
             priority: Priority::Default,
             tag: "white_check_mark".to_owned(),
             session_id: None,
@@ -309,7 +317,7 @@ pub(super) fn ntfy_provider(
     })
 }
 
-fn notification_policy(
+pub(super) fn notification_policy(
     settings: &SettingsDto,
 ) -> Result<NotificationPolicy, monitor_notify::NotifyError> {
     let ntfy = settings
@@ -327,6 +335,37 @@ fn notification_policy(
 mod tests {
     use super::*;
 
+    struct BlockingStore {
+        previous: SettingsDto,
+        persist_entered: Arc<tokio::sync::Barrier>,
+        persist_resume: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl SettingsStore for BlockingStore {
+        async fn load(&self) -> Result<SettingsDto, ()> {
+            Ok(self.previous.clone())
+        }
+
+        async fn persist(&self, _: &SettingsDto, _: i64) -> Result<(), ()> {
+            self.persist_entered.wait().await;
+            self.persist_resume.wait().await;
+            Ok(())
+        }
+    }
+
+    struct DisabledAutostart;
+
+    impl AutostartControl for DisabledAutostart {
+        fn is_enabled(&self) -> Result<bool, ()> {
+            Ok(false)
+        }
+
+        fn set_enabled(&self, enabled: bool) -> Result<(), ()> {
+            (!enabled).then_some(()).ok_or(())
+        }
+    }
+
     #[test]
     fn disabled_ntfy_does_not_require_configuration() {
         assert!(validate_settings(&SettingsDto::default()).is_ok());
@@ -341,5 +380,51 @@ mod tests {
             ..SettingsDto::default()
         };
         assert!(validate_settings(&settings).is_ok());
+    }
+
+    #[test]
+    fn test_notification_copy_requires_receiver_verification() {
+        assert!(NTFY_TEST_BODY.contains("检查接收设备"));
+        assert!(!NTFY_TEST_BODY.contains("正常接收"));
+        assert!(!NTFY_TEST_BODY.contains("配置有效"));
+    }
+
+    #[tokio::test]
+    async fn provider_writer_covers_settings_persistence_and_policy_publication() {
+        let persist_entered = Arc::new(tokio::sync::Barrier::new(2));
+        let persist_resume = Arc::new(tokio::sync::Barrier::new(2));
+        let store = Arc::new(BlockingStore {
+            previous: SettingsDto::default(),
+            persist_entered: persist_entered.clone(),
+            persist_resume: persist_resume.clone(),
+        });
+        let providers = Arc::new(tokio::sync::RwLock::new(NotificationPolicy::desktop_only()));
+        let desired = SettingsDto {
+            ntfy_enabled: true,
+            ntfy_server: "https://ntfy.sh".into(),
+            ntfy_topic: "cc-monitor-test".into(),
+            ..SettingsDto::default()
+        };
+        let save_store = store.clone();
+        let save_providers = providers.clone();
+        let save = tokio::spawn(async move {
+            save_settings_consistently(
+                save_store.as_ref(),
+                &DisabledAutostart,
+                save_providers.as_ref(),
+                desired,
+                1,
+            )
+            .await
+        });
+
+        persist_entered.wait().await;
+        assert!(
+            providers.try_read().is_err(),
+            "workers must not observe a policy between persistence and publication"
+        );
+        persist_resume.wait().await;
+        save.await.unwrap().unwrap();
+        assert!(providers.read().await.ntfy_provider().is_some());
     }
 }

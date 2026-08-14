@@ -72,16 +72,33 @@ export type IndexProgress = {
 };
 export type CleanupResult = { rawEventsDeleted: number; notificationsDeleted: number };
 export type ReindexStarted = { runId: string };
+export type ModelPrice = {
+  modelId: string;
+  inputCostPerMillion: string;
+  outputCostPerMillion: string;
+  cacheWriteCostPerMillion: string;
+  cacheReadCostPerMillion: string;
+};
+export type SaveModelPrice = ModelPrice;
 
 export type SessionDetail = {
   session: SessionRow;
-  models: { modelId: string; tokens: Decimal; costPicoUsd: Decimal; costKnown: boolean; unpricedTokens?: Decimal }[];
+  models: {
+    modelId: string;
+    inputTokens: Decimal;
+    outputTokens: Decimal;
+    cacheWriteTokens: Decimal;
+    cacheReadTokens: Decimal;
+    tokens: Decimal;
+    costPicoUsd: Decimal;
+    costKnown: boolean;
+    unpricedTokens?: Decimal;
+  }[];
   events: { sourceEvent: string; source: string; occurredAtMs: number }[];
 };
 
 export type SettingsDto = {
   ntfyEnabled: boolean;
-  ntfyActivationPending?: boolean;
   ntfyServer: string;
   ntfyTopic: string;
   ntfyUsername: string;
@@ -142,7 +159,10 @@ export const api = {
   session: (sessionId: string) =>
     invoke<SessionDetail>("get_session_detail", { sessionId }),
   settings: () => invoke<SettingsDto>("get_settings"),
-  saveSettings: (settings: SettingsDto) => invoke<void>("save_settings", { settings }),
+  saveSettings: (settings: SettingsDto) => invoke<SettingsDto>("save_settings", { settings }),
+  modelPrices: () => invoke<ModelPrice[]>("list_model_prices"),
+  saveModelPrice: (price: SaveModelPrice) => invoke<ModelPrice>("save_model_price", { price }),
+  deleteModelPrice: (modelId: string) => invoke<string>("delete_model_price", { modelId }),
   testNtfy: (settings: SettingsDto) => invoke<void>("test_ntfy", { settings }),
   installHook: () => invoke<void>("install_claude_hook"),
   uninstallHook: () => invoke<boolean>("uninstall_claude_hook"),

@@ -2,29 +2,7 @@ use crate::{
     AgentEvent, Confidence, EventSource, NotificationEdge, NotificationKind, Reduction,
     SessionLifecycle, SessionProjection, StateReason, TurnState,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ReducerCheckpoint {
-    projection: Option<SessionProjection>,
-    unresolved_question: bool,
-    hook_needs_input_sticky: bool,
-    latest_usable_hook_at_ms: Option<i64>,
-    terminal_notified: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CheckpointedReduction {
-    pub reduction: Reduction,
-    pub checkpoint: ReducerCheckpoint,
-}
-
-impl ReducerCheckpoint {
-    pub fn projection(&self) -> Option<&SessionProjection> {
-        self.projection.as_ref()
-    }
-}
 
 #[derive(Default)]
 struct ReducerState {
@@ -37,36 +15,17 @@ struct ReducerState {
 }
 
 pub fn reduce(events: impl IntoIterator<Item = AgentEvent>) -> Reduction {
-    reduce_inner(ReducerCheckpoint::default(), events, None).reduction
+    reduce_inner(events, None)
 }
 
 pub fn reduce_at(events: impl IntoIterator<Item = AgentEvent>, observed_now_ms: i64) -> Reduction {
-    reduce_inner(ReducerCheckpoint::default(), events, Some(observed_now_ms)).reduction
-}
-
-/// Resumes the same reducer state used by full replay. Callers may use this
-/// only when every supplied event sorts strictly after the checkpointed
-/// evidence; late evidence must discard the checkpoint and replay in full.
-pub fn reduce_from_checkpoint(
-    checkpoint: ReducerCheckpoint,
-    events: impl IntoIterator<Item = AgentEvent>,
-) -> CheckpointedReduction {
-    reduce_inner(checkpoint, events, None)
-}
-
-pub fn reduce_from_checkpoint_at(
-    checkpoint: ReducerCheckpoint,
-    events: impl IntoIterator<Item = AgentEvent>,
-    observed_now_ms: i64,
-) -> CheckpointedReduction {
-    reduce_inner(checkpoint, events, Some(observed_now_ms))
+    reduce_inner(events, Some(observed_now_ms))
 }
 
 fn reduce_inner(
-    checkpoint: ReducerCheckpoint,
     events: impl IntoIterator<Item = AgentEvent>,
     observed_now_ms: Option<i64>,
-) -> CheckpointedReduction {
+) -> Reduction {
     let mut seen = HashSet::new();
     let mut events: Vec<_> = events
         .into_iter()
@@ -74,14 +33,7 @@ fn reduce_inner(
         .collect();
     events.sort_by(AgentEvent::replay_cmp);
 
-    let mut state = ReducerState {
-        projection: checkpoint.projection,
-        unresolved_question: checkpoint.unresolved_question,
-        hook_needs_input_sticky: checkpoint.hook_needs_input_sticky,
-        latest_usable_hook_at_ms: checkpoint.latest_usable_hook_at_ms,
-        terminal_notified: checkpoint.terminal_notified,
-        notifications: Vec::new(),
-    };
+    let mut state = ReducerState::default();
     for event in events {
         apply(&mut state, event);
     }
@@ -95,19 +47,9 @@ fn reduce_inner(
             projection.changed_at_ms = projection.last_observed_at_ms.saturating_add(30_001);
         }
     }
-    let checkpoint = ReducerCheckpoint {
-        projection: state.projection.clone(),
-        unresolved_question: state.unresolved_question,
-        hook_needs_input_sticky: state.hook_needs_input_sticky,
-        latest_usable_hook_at_ms: state.latest_usable_hook_at_ms,
-        terminal_notified: state.terminal_notified,
-    };
-    CheckpointedReduction {
-        reduction: Reduction {
-            projection: state.projection,
-            notifications: state.notifications,
-        },
-        checkpoint,
+    Reduction {
+        projection: state.projection,
+        notifications: state.notifications,
     }
 }
 

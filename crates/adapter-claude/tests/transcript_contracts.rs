@@ -1,7 +1,7 @@
 use adapter_claude::{
-    indexing::start_all_history,
-    pricing::PriceCatalog,
+    indexing::start_all_history_with_catalog,
     pricing::TokenUsage,
+    pricing::{Price, PriceCatalog},
     transcript::{
         discover, ingest_streaming, DiscoveredTranscript, TranscriptCursor, TranscriptError,
         TranscriptStreamItem, UsageRecord, MAX_TRANSCRIPT_LINE_BYTES,
@@ -136,6 +136,46 @@ fn collect_ingest(
 }
 
 #[tokio::test]
+async fn incremental_and_full_history_paths_use_the_supplied_price_catalog() {
+    let temp = tempdir().unwrap();
+    let bytes = b"{\"type\":\"assistant\",\"message\":{\"id\":\"priced\",\"model\":\"custom_model\",\"usage\":{\"input_tokens\":10},\"content\":[]}}\n";
+    let (_, descriptor) = project_file(&temp, bytes);
+    let catalog = PriceCatalog::with_changes([(
+        "custom-model".to_owned(),
+        Some(Price {
+            input: 7_000_000_000_000,
+            output: 0,
+            cache_write: 0,
+            cache_read: 0,
+        }),
+    )]);
+
+    let incremental = collect_ingest(&descriptor, None, &catalog, 0, true).unwrap();
+    assert_eq!(incremental.usage[0].cost_pico_usd, 70_000_000);
+    assert!(incremental.usage[0].cost_known);
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let sink_capture = Arc::clone(&captured);
+    let task = start_all_history_with_catalog(
+        temp.path().to_path_buf(),
+        0,
+        catalog,
+        move |indexed| {
+            if let TranscriptStreamItem::Chunk { usage, .. } = indexed.item {
+                sink_capture.lock().unwrap().extend(usage);
+            }
+            Ok(())
+        },
+        |_| Ok(()),
+        |_| {},
+    );
+    task.result.await.unwrap().unwrap();
+    let full = captured.lock().unwrap();
+    assert_eq!(full[0].cost_pico_usd, 70_000_000);
+    assert!(full[0].cost_known);
+}
+
+#[tokio::test]
 async fn usage_fixture_matches_contract_and_never_allows_historical_notifications() {
     let temp = tempdir().unwrap();
     let project = temp.path().join("project");
@@ -182,7 +222,6 @@ async fn usage_fixture_matches_contract_and_never_allows_historical_notification
                 descriptor.session_id(),
                 true,
                 false,
-                &cursor,
                 index as i64,
             )
             .await
@@ -196,7 +235,7 @@ async fn usage_fixture_matches_contract_and_never_allows_historical_notification
             })
             .collect();
         repository
-            .chunk(Vec::new(), usage, &cursor, index as i64)
+            .chunk(Vec::new(), usage, index as i64)
             .await
             .unwrap();
         repository.commit(&cursor, index as i64).await.unwrap();
@@ -281,13 +320,12 @@ async fn full_history_replacement_rebuilds_cross_source_usage_candidates() {
                 descriptor.session_id(),
                 true,
                 false,
-                &cursor,
                 index as i64,
             )
             .await
             .unwrap();
         repository
-            .chunk(Vec::new(), usage, &cursor, index as i64)
+            .chunk(Vec::new(), usage, index as i64)
             .await
             .unwrap();
         repository.commit(&cursor, index as i64).await.unwrap();
@@ -342,7 +380,6 @@ async fn future_transcript_usage_timestamp_is_clamped_before_storage_day_project
             descriptor.session_id(),
             true,
             false,
-            &cursor,
             observed_at_ms,
         )
         .await
@@ -354,7 +391,6 @@ async fn future_transcript_usage_timestamp_is_clamped_before_storage_day_project
                 .into_iter()
                 .map(|record| stored_usage(record, "future".into()))
                 .collect(),
-            &cursor,
             observed_at_ms,
         )
         .await
@@ -496,14 +532,7 @@ async fn usage_identity_fixture_obeys_all_stable_and_anonymous_rules() {
         let cursor = TranscriptCursorPosition::default();
         let mut repository = TranscriptIngestRepository::new(pool.clone());
         repository
-            .begin(
-                "fixture.jsonl".into(),
-                "fixture".into(),
-                true,
-                false,
-                &cursor,
-                1,
-            )
+            .begin("fixture.jsonl".into(), "fixture".into(), true, false, 1)
             .await
             .unwrap();
         repository
@@ -513,7 +542,6 @@ async fn usage_identity_fixture_obeys_all_stable_and_anonymous_rules() {
                     .enumerate()
                     .map(|(index, record)| stored_usage(record, format!("case-{index}")))
                     .collect(),
-                &cursor,
                 1,
             )
             .await
@@ -545,9 +573,10 @@ async fn all_history_index_reports_progress_off_thread_and_disables_notification
     let sink_capture = Arc::clone(&captured);
     let finished = Arc::new(AtomicUsize::new(0));
     let progress_finished = Arc::clone(&finished);
-    let task = start_all_history(
+    let task = start_all_history_with_catalog(
         temp.path().to_path_buf(),
         i64::MAX / 2,
+        PriceCatalog::default(),
         move |batch| {
             sink_capture.lock().unwrap().push(batch);
             Ok(())
@@ -601,9 +630,10 @@ async fn full_history_reindex_forces_replacement_after_shorter_rewrite() {
         }
         let captured_items = Arc::new(Mutex::new((Vec::new(), Vec::new())));
         let captured = Arc::clone(&captured_items);
-        let task = start_all_history(
+        let task = start_all_history_with_catalog(
             temp.path().to_path_buf(),
             i64::MAX / 2,
+            PriceCatalog::default(),
             move |batch| {
                 match batch.item {
                     TranscriptStreamItem::Begin { reset, .. } => {
@@ -914,9 +944,10 @@ async fn indexing_completes_more_than_sixteen_files_through_synchronous_sink() {
     let sink_count = Arc::clone(&count);
     let progress_count = Arc::new(AtomicUsize::new(0));
     let progress_sink_count = Arc::clone(&progress_count);
-    let task = start_all_history(
+    let task = start_all_history_with_catalog(
         temp.path().to_path_buf(),
         0,
+        PriceCatalog::default(),
         move |_| {
             sink_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -939,9 +970,10 @@ async fn discovery_errors_reach_index_result_and_progress() {
     let missing = temp.path().join("missing");
     let progress = Arc::new(Mutex::new(Vec::new()));
     let progress_sink = Arc::clone(&progress);
-    let task = start_all_history(
+    let task = start_all_history_with_catalog(
         missing,
         0,
+        PriceCatalog::default(),
         |_| Ok(()),
         |_| Ok(()),
         move |item| {
@@ -969,9 +1001,10 @@ async fn huge_file_obeys_chunk_bound_and_slow_sink_backpressure() {
     let chunks = Arc::new(AtomicUsize::new(0));
     let max_sink = Arc::clone(&max_seen);
     let chunk_sink = Arc::clone(&chunks);
-    let task = start_all_history(
+    let task = start_all_history_with_catalog(
         temp.path().to_path_buf(),
         0,
+        PriceCatalog::default(),
         move |batch| {
             if let TranscriptStreamItem::Chunk { events, usage, .. } = batch.item {
                 max_sink.fetch_max(events.len() + usage.len(), Ordering::Relaxed);
@@ -1001,9 +1034,10 @@ async fn last_file_sink_failure_has_one_terminal_error_progress() {
     let sink_attempts = Arc::clone(&attempts);
     let progress = Arc::new(Mutex::new(Vec::new()));
     let progress_sink = Arc::clone(&progress);
-    let task = start_all_history(
+    let task = start_all_history_with_catalog(
         temp.path().to_path_buf(),
         0,
+        PriceCatalog::default(),
         move |_| {
             if sink_attempts.fetch_add(1, Ordering::Relaxed) == 4 {
                 Err("fixture sink failure".into())
@@ -1037,9 +1071,10 @@ async fn all_history_persists_ten_thousand_present_paths_in_pages_of_at_most_six
     let total = Arc::new(AtomicUsize::new(0));
     let maximum_sink = Arc::clone(&maximum);
     let total_sink = Arc::clone(&total);
-    let task = start_all_history(
+    let task = start_all_history_with_catalog(
         temp.path().to_path_buf(),
         0,
+        PriceCatalog::default(),
         |_| Ok(()),
         move |paths| {
             maximum_sink.fetch_max(paths.len(), Ordering::Relaxed);
@@ -1064,9 +1099,10 @@ async fn all_history_can_cancel_at_the_first_present_path_page_boundary() {
     }
     let pages = Arc::new(AtomicUsize::new(0));
     let page_sink = Arc::clone(&pages);
-    let task = start_all_history(
+    let task = start_all_history_with_catalog(
         temp.path().to_path_buf(),
         0,
+        PriceCatalog::default(),
         |_| Ok(()),
         move |paths| {
             assert!(paths.len() <= 64);
@@ -1149,7 +1185,7 @@ fn every_streamed_chunk_keeps_the_legacy_sha256_prefix_anchor() {
         let prefix = &bytes[..cursor.byte_offset as usize];
         assert_eq!(
             cursor.content_anchor.as_deref(),
-            Some(format!("{:x}", Sha256::digest(prefix)).as_str())
+            Some(hex::encode(Sha256::digest(prefix)).as_str())
         );
     }
 }
@@ -1462,7 +1498,6 @@ async fn persisted_cursor_round_trip_resumes_without_storing_partial_content() {
             descriptor.session_id().to_owned(),
             false,
             false,
-            &cursor_position,
             1,
         )
         .await

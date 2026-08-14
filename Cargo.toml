@@ -19,23 +19,37 @@ rust-version = "1.88"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 futures-util = "0.3"
+hex = "0.4"
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
-sha2 = { version = "0.10", features = ["compress"] }
+sha2 = "0.11"
 shell-words = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 uuid = { version = "1", features = ["v7"] }
 url = "2"
+
+# Keep local macOS builds from accumulating unpacked debug objects and large
+# incremental caches. Line tables preserve useful backtraces while making the
+# development and test profiles substantially smaller on disk.
+[profile.dev]
+debug = 1
+split-debuginfo = "packed"
+incremental = false
+
+[profile.test]
+debug = 1
+split-debuginfo = "packed"
+incremental = false
 
 [profile.release]
 opt-level = "z"

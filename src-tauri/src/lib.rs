@@ -1,3 +1,5 @@
+#![warn(unreachable_pub)]
+
 mod desktop;
 mod hook_lifecycle;
 mod hook_onboarding;
@@ -59,13 +61,8 @@ pub fn run() {
         // This must stay first: later plugins and setup may touch application
         // state, while a second process must stop before either can run.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("dashboard") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            let _ = desktop::show_window(app, None);
         }))
-        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_autostart::init(
@@ -113,6 +110,9 @@ pub fn run() {
             desktop::get_session_detail,
             desktop::get_settings,
             desktop::save_settings,
+            desktop::pricing::list_model_prices,
+            desktop::pricing::save_model_price,
+            desktop::pricing::delete_model_price,
             desktop::test_ntfy,
             desktop::show_dashboard,
             desktop::clear_completed_history,
@@ -126,6 +126,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn second_instance_reuses_the_shared_window_activation_path() {
+        let source = include_str!("lib.rs");
+        let callback = source
+            .split_once("tauri_plugin_single_instance::init")
+            .expect("single-instance plugin must be configured")
+            .1
+            .split_once(".setup(")
+            .expect("single-instance plugin must precede setup")
+            .0;
+
+        assert!(callback.contains("desktop::show_window(app, None)"));
+        assert!(!callback.contains("get_webview_window"));
+    }
+
     #[test]
     fn every_fixed_ipc_error_rejects_underlying_text() {
         let secret = "/Users/private/transcript.jsonl: database failed";

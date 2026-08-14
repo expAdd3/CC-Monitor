@@ -5,11 +5,10 @@ use super::{
 };
 use crate::hook_lifecycle::{HookLifecycleState, HookOwnershipRecord};
 use chrono::{Duration as ChronoDuration, Local};
-use futures_util::TryStreamExt;
 use monitor_engine::MAX_DELIVERY_ATTEMPTS;
 use monitor_notify::diagnostic_code;
 use monitor_storage::UsageTotals;
-use sqlx::{Row, SqliteConnection, SqlitePool};
+use sqlx::{AssertSqlSafe, Row, SqliteConnection, SqlitePool};
 use std::collections::BTreeMap;
 
 const ACTIVE_SESSION_WINDOW: &str =
@@ -55,12 +54,12 @@ async fn tray_snapshot_in_transaction(
     let cutoff = now - ACTIVE_WINDOW_MS;
     let day = Local::now().date_naive();
     let (counts, _) = active_session_counts(connection, cutoff, now).await?;
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "{SESSION_SUMMARY_SELECT}
          WHERE p.agent_kind='claude' AND {ACTIVE_SESSION_WINDOW}
          ORDER BY p.last_observed_at_ms DESC,p.session_id
          LIMIT ?3"
-    ))
+    )))
     .bind(cutoff)
     .bind(now)
     .bind(TRAY_SESSION_LIMIT)
@@ -72,7 +71,7 @@ async fn tray_snapshot_in_transaction(
         session.project_name = resolve_project_name(labels);
         sessions.push(session);
     }
-    let mut by_session = BTreeMap::new();
+    let mut by_session = BTreeMap::<String, UsageTotals>::new();
     let usage_sql = format!(
         "WITH visible_sessions AS (
              SELECT p.agent_kind,p.session_id
@@ -83,24 +82,21 @@ async fn tray_snapshot_in_transaction(
          )
          SELECT u.session_id,
                 u.input_tokens,u.output_tokens,u.cache_write_tokens,
-                u.cache_read_tokens,u.cost_pico_usd,u.cost_known
+                u.cache_read_tokens,u.cost_pico_usd,u.cost_known,
+                u.unpriced_tokens
            FROM visible_sessions p
-           JOIN usage_records u
+           JOIN usage_session_aggregates u
              ON u.agent_kind=p.agent_kind AND u.session_id=p.session_id"
     );
-    let mut usage_rows = sqlx::query(&usage_sql)
+    let usage_rows = sqlx::query(AssertSqlSafe(usage_sql))
         .bind(cutoff)
         .bind(now)
         .bind(TRAY_SESSION_LIMIT)
-        .fetch(&mut *connection);
-    while let Some(row) = usage_rows.try_next().await? {
-        add_usage(
-            &mut by_session,
-            row.get("session_id"),
-            usage_from_record_row(&row),
-        );
+        .fetch_all(&mut *connection)
+        .await?;
+    for row in &usage_rows {
+        by_session.insert(row.get("session_id"), usage_from_aggregate_row(row));
     }
-    drop(usage_rows);
     for session in &mut sessions {
         session.usage = usage_summary(
             by_session
@@ -111,9 +107,9 @@ async fn tray_snapshot_in_transaction(
     }
     let rows = sqlx::query(
         "SELECT local_day,input_tokens,output_tokens,cache_write_tokens,
-                cache_read_tokens,cost_pico_usd,cost_known
-           FROM usage_records
-          WHERE local_day >= ?1 AND local_day <= ?2",
+                cache_read_tokens,cost_pico_usd,cost_known,unpriced_tokens
+           FROM usage_daily_aggregates
+          WHERE agent_kind='claude' AND local_day >= ?1 AND local_day <= ?2",
     )
     .bind((day - ChronoDuration::days(29)).to_string())
     .bind(day.to_string())
@@ -121,7 +117,7 @@ async fn tray_snapshot_in_transaction(
     .await?;
     let mut days = BTreeMap::new();
     for row in &rows {
-        add_usage(&mut days, row.get("local_day"), usage_from_record_row(row));
+        days.insert(row.get("local_day"), usage_from_aggregate_row(row));
     }
     let today = usage_summary(
         days.get(&day.to_string())
@@ -206,12 +202,12 @@ async fn snapshot_in_transaction(
     let cutoff = read_at_ms - ACTIVE_WINDOW_MS;
     let (counts, active_session_count) =
         active_session_counts(connection, cutoff, read_at_ms).await?;
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(AssertSqlSafe(format!(
         "{SESSION_SUMMARY_SELECT}
          WHERE p.agent_kind='claude' AND {ACTIVE_SESSION_WINDOW}
          ORDER BY p.last_observed_at_ms DESC,p.session_id
          LIMIT ?3"
-    ))
+    )))
     .bind(cutoff)
     .bind(read_at_ms)
     .bind(DASHBOARD_SESSION_LIMIT)
@@ -221,7 +217,8 @@ async fn snapshot_in_transaction(
     let usage_sql = format!(
         "SELECT u.session_id,
                 u.input_tokens,u.output_tokens,u.cache_write_tokens,
-                u.cache_read_tokens,u.cost_pico_usd,u.cost_known
+                u.cache_read_tokens,u.cost_pico_usd,u.cost_known,
+                u.unpriced_tokens
            FROM (
                  SELECT p.agent_kind,p.session_id
                    FROM session_projection p
@@ -229,23 +226,19 @@ async fn snapshot_in_transaction(
                   ORDER BY p.last_observed_at_ms DESC,p.session_id
                   LIMIT ?3
            ) p
-           JOIN usage_records u
+           JOIN usage_session_aggregates u
              ON u.agent_kind=p.agent_kind AND u.session_id=p.session_id"
     );
-    let mut usage_rows = sqlx::query(&usage_sql)
+    let usage_rows = sqlx::query(AssertSqlSafe(usage_sql))
         .bind(cutoff)
         .bind(read_at_ms)
         .bind(DASHBOARD_SESSION_LIMIT)
-        .fetch(&mut *connection);
+        .fetch_all(&mut *connection)
+        .await?;
     let mut session_usage = BTreeMap::<String, UsageTotals>::new();
-    while let Some(row) = usage_rows.try_next().await? {
-        add_usage(
-            &mut session_usage,
-            row.get("session_id"),
-            usage_from_record_row(&row),
-        );
+    for row in &usage_rows {
+        session_usage.insert(row.get("session_id"), usage_from_aggregate_row(row));
     }
-    drop(usage_rows);
     for (session, _) in &mut pending_sessions {
         session.usage = usage_summary(
             session_usage
@@ -266,9 +259,9 @@ async fn snapshot_in_transaction(
     let range_start = local_day - ChronoDuration::days(364);
     let trend_rows = sqlx::query(
         "SELECT local_day,input_tokens,output_tokens,cache_write_tokens,
-                cache_read_tokens,cost_pico_usd,cost_known
-           FROM usage_records
-          WHERE local_day >= ?1 AND local_day <= ?2",
+                cache_read_tokens,cost_pico_usd,cost_known,unpriced_tokens
+           FROM usage_daily_aggregates
+          WHERE agent_kind='claude' AND local_day >= ?1 AND local_day <= ?2",
     )
     // The snapshot supplies a sparse annual usage projection. Consumers that
     // need a shorter window (such as the tray's 7/30-day summaries) apply
@@ -279,11 +272,7 @@ async fn snapshot_in_transaction(
     .await?;
     let mut daily_usage = BTreeMap::<String, UsageTotals>::new();
     for row in &trend_rows {
-        add_usage(
-            &mut daily_usage,
-            row.get("local_day"),
-            usage_from_record_row(row),
-        );
+        daily_usage.insert(row.get("local_day"), usage_from_aggregate_row(row));
     }
     let installation = sqlx::query(
         "SELECT installation_id,hook_path,hook_version
@@ -420,7 +409,7 @@ async fn active_session_counts(
     cutoff: i64,
     now: i64,
 ) -> anyhow::Result<(Counts, i64)> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "SELECT
              COUNT(*) total,
              COALESCE(SUM(p.turn_state='running'),0) running,
@@ -429,7 +418,7 @@ async fn active_session_counts(
              COALESCE(SUM(p.turn_state='failed'),0) failed
            FROM session_projection p
           WHERE p.agent_kind='claude' AND {ACTIVE_SESSION_WINDOW}"
-    ))
+    )))
     .bind(cutoff)
     .bind(now)
     .fetch_one(&mut *connection)
@@ -453,31 +442,43 @@ pub(super) async fn session_detail(
     let mut pending_session = session_summary(&mut transaction, session_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("session not found"))?;
-    let mut model_rows = sqlx::query(
-        "SELECT model_id,input_tokens,output_tokens,cache_write_tokens,
-                cache_read_tokens,cost_pico_usd,cost_known
-           FROM usage_records
+    let session_usage = sqlx::query(
+        "SELECT input_tokens,output_tokens,cache_write_tokens,cache_read_tokens,
+                cost_pico_usd,cost_known,unpriced_tokens
+           FROM usage_session_aggregates
           WHERE agent_kind='claude' AND session_id=?1",
     )
     .bind(session_id)
-    .fetch(&mut *transaction);
-    let mut model_usage = BTreeMap::<String, UsageTotals>::new();
-    let mut session_usage = empty_usage();
-    while let Some(row) = model_rows.try_next().await? {
-        let usage = usage_from_record_row(&row);
-        session_usage.add(usage);
-        add_usage(&mut model_usage, row.get("model_id"), usage);
-    }
-    drop(model_rows);
+    .fetch_optional(&mut *transaction)
+    .await?
+    .as_ref()
+    .map(usage_from_aggregate_row)
+    .unwrap_or_else(empty_usage);
+    let model_rows = sqlx::query(
+        "SELECT model_id,input_tokens,output_tokens,cache_write_tokens,
+                cache_read_tokens,cost_pico_usd,cost_known,unpriced_tokens
+           FROM usage_model_aggregates
+          WHERE agent_kind='claude' AND session_id=?1",
+    )
+    .bind(session_id)
+    .fetch_all(&mut *transaction)
+    .await?;
     pending_session.0.usage = usage_summary(session_usage);
-    let mut models: Vec<_> = model_usage
+    let mut models: Vec<_> = model_rows
         .into_iter()
-        .map(|(model_id, usage)| ModelUsage {
-            model_id,
-            tokens: usage.tokens(),
-            cost_pico_usd: usage.cost_pico_usd,
-            cost_known: usage.cost_known,
-            unpriced_tokens: usage.unpriced_tokens,
+        .map(|row| {
+            let usage = usage_from_aggregate_row(&row);
+            ModelUsage {
+                model_id: row.get("model_id"),
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                tokens: usage.tokens(),
+                cost_pico_usd: usage.cost_pico_usd,
+                cost_known: usage.cost_known,
+                unpriced_tokens: usage.unpriced_tokens,
+            }
         })
         .collect();
     models.sort_by(|left, right| {
@@ -513,10 +514,10 @@ async fn session_summary(
     connection: &mut SqliteConnection,
     session_id: &str,
 ) -> anyhow::Result<Option<(SessionRow, SessionLabelEvidence)>> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(AssertSqlSafe(format!(
         "{SESSION_SUMMARY_SELECT}
          WHERE p.agent_kind='claude' AND p.session_id=?1"
-    ))
+    )))
     .bind(session_id)
     .fetch_optional(&mut *connection)
     .await?;
@@ -618,7 +619,7 @@ fn empty_usage() -> UsageTotals {
     UsageTotals::from_values(0, 0, 0, 0, 0, true)
 }
 
-fn usage_from_record_row(row: &sqlx::sqlite::SqliteRow) -> UsageTotals {
+fn usage_from_aggregate_row(row: &sqlx::sqlite::SqliteRow) -> UsageTotals {
     let cost_known = row.get::<i64, _>("cost_known") != 0;
     let mut usage = UsageTotals::from_values(
         row.get("input_tokens"),
@@ -628,13 +629,8 @@ fn usage_from_record_row(row: &sqlx::sqlite::SqliteRow) -> UsageTotals {
         row.get("cost_pico_usd"),
         cost_known,
     );
-    if !cost_known {
-        usage.unpriced_tokens = usage.tokens();
-    }
+    usage.unpriced_tokens = row.get("unpriced_tokens");
     usage
-}
-fn add_usage(rows: &mut BTreeMap<String, UsageTotals>, key: String, usage: UsageTotals) {
-    rows.entry(key).or_insert_with(empty_usage).add(usage);
 }
 
 fn usage_summary(usage: UsageTotals) -> UsageSummary {
@@ -796,7 +792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_read_models_saturate_in_rust_without_sqlite_sum_overflow() {
+    async fn usage_read_models_use_bounded_saturating_aggregates() {
         let directory = tempfile::tempdir().unwrap();
         let pool = monitor_storage::connect(&directory.path().join("state.db"))
             .await
@@ -834,6 +830,15 @@ mod tests {
             .await
             .unwrap();
         }
+        sqlx::query("UPDATE usage_aggregate_state SET is_current=0 WHERE singleton=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        monitor_storage::migrate(&pool).await.unwrap();
+        sqlx::query("DROP TABLE usage_records")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let dashboard = snapshot_for_test(&pool, || 1).await.unwrap();
         assert_eq!(dashboard.today.input_tokens, i64::MAX);
@@ -845,6 +850,7 @@ mod tests {
         let detail = session_detail(&pool, "large").await.unwrap();
         assert_eq!(detail.session.usage.input_tokens, i64::MAX);
         assert_eq!(detail.models[0].tokens, i64::MAX);
+        assert_eq!(detail.models[0].input_tokens, i64::MAX);
     }
 
     #[tokio::test]

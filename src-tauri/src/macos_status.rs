@@ -5,7 +5,7 @@ use objc2::{
     AnyThread, MainThreadMarker,
 };
 use objc2_app_kit::{
-    NSAttributedStringNSStringDrawing, NSBezierPath, NSCellImagePosition, NSColor,
+    NSAccessibility, NSAttributedStringNSStringDrawing, NSBezierPath, NSCellImagePosition, NSColor,
     NSCompositingOperation, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
     NSImageSymbolConfiguration, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
     NSRectFillUsingOperation, NSTextAlignment, NSTextTab,
@@ -16,7 +16,9 @@ use objc2_foundation::{
 };
 use tauri::{tray::TrayIcon, Runtime};
 
-pub fn update<R: Runtime>(tray: &TrayIcon<R>, running: i64, waiting: i64, needs_input: i64) {
+use crate::desktop::{TrayMenuRow, TrayMenuRowKind};
+
+pub(crate) fn update<R: Runtime>(tray: &TrayIcon<R>, running: i64, waiting: i64, needs_input: i64) {
     let values = [
         running.max(0).to_string(),
         waiting.max(0).to_string(),
@@ -44,13 +46,7 @@ pub fn update<R: Runtime>(tray: &TrayIcon<R>, running: i64, waiting: i64, needs_
     });
 }
 
-pub struct SessionMenuRow {
-    pub primary: String,
-    pub detail: String,
-    pub state: String,
-}
-
-pub fn style_menu_rows<R: Runtime>(tray: &TrayIcon<R>, session_rows: Vec<SessionMenuRow>) {
+pub(crate) fn style_menu_rows<R: Runtime>(tray: &TrayIcon<R>, rows: Vec<TrayMenuRow>) {
     let _ = tray.with_inner_tray_icon(move |inner| {
         let Some(status_item) = inner.ns_status_item() else {
             return;
@@ -61,57 +57,70 @@ pub fn style_menu_rows<R: Runtime>(tray: &TrayIcon<R>, session_rows: Vec<Session
         let Some(menu) = status_item.menu(mtm) else {
             return;
         };
-        for item in menu.itemArray().iter() {
-            let title = item.title().to_string();
-            if let Some(row) = session_rows.iter().find(|row| row.primary == title) {
-                let font = NSFont::systemFontOfSize_weight(12.0, 0.0);
-                item.setAttributedTitle(Some(&attributed_columns(
-                    &title,
-                    &font,
-                    &NSColor::labelColor(),
-                )));
-                item.setImage(status_symbol(&row.state).as_deref());
-                continue;
-            }
-            if session_rows.iter().any(|row| row.detail == title) {
-                let font = NSFont::systemFontOfSize_weight(11.0, 0.0);
-                item.setAttributedTitle(Some(&attributed_columns(
-                    &title,
-                    &font,
-                    &NSColor::secondaryLabelColor(),
-                )));
-                continue;
-            }
-            let (font, color) = if title == "CC Monitor" {
-                (
-                    NSFont::systemFontOfSize_weight(12.0, 0.35),
-                    NSColor::labelColor(),
-                )
-            } else if title.starts_with("最近活跃会话（") {
-                (
-                    NSFont::systemFontOfSize_weight(10.0, 0.35),
-                    NSColor::secondaryLabelColor(),
-                )
-            } else if title.contains("需要介入") || title.contains("失败") {
-                (
-                    NSFont::systemFontOfSize_weight(11.0, 0.35),
-                    NSColor::systemRedColor(),
-                )
-            } else if title.starts_with("今日 ")
-                || title == "暂无活跃会话"
-                || title == "当前没有活跃会话"
-                || title.contains(" 个会话")
-            {
-                (
-                    NSFont::systemFontOfSize_weight(11.0, 0.0),
-                    NSColor::secondaryLabelColor(),
-                )
-            } else {
+        let items = menu.itemArray();
+        if items.len() != rows.len() {
+            return;
+        }
+        for (item, row) in items.iter().zip(rows) {
+            let TrayMenuRow::Item { title, kind, .. } = row else {
                 continue;
             };
-            item.setAttributedTitle(Some(&attributed(&title, &font, &color)));
+            match kind {
+                TrayMenuRowKind::Product => {
+                    set_plain_row(&item, &title, 12.0, 0.35, &NSColor::labelColor())
+                }
+                TrayMenuRowKind::Status { urgent } => {
+                    let color = if urgent {
+                        NSColor::systemRedColor()
+                    } else {
+                        NSColor::secondaryLabelColor()
+                    };
+                    set_plain_row(&item, &title, 11.0, if urgent { 0.35 } else { 0.0 }, &color);
+                }
+                TrayMenuRowKind::Today | TrayMenuRowKind::UsageWindow | TrayMenuRowKind::Empty => {
+                    set_plain_row(&item, &title, 11.0, 0.0, &NSColor::secondaryLabelColor())
+                }
+                TrayMenuRowKind::SessionsHeading => {
+                    set_plain_row(&item, &title, 10.0, 0.35, &NSColor::secondaryLabelColor())
+                }
+                TrayMenuRowKind::SessionPrimary {
+                    state,
+                    accessibility_label,
+                } => {
+                    let font = NSFont::systemFontOfSize_weight(12.0, 0.0);
+                    item.setAttributedTitle(Some(&attributed_columns(
+                        &title,
+                        &font,
+                        &NSColor::labelColor(),
+                    )));
+                    item.setImage(status_symbol(&state).as_deref());
+                    item.setAccessibilityElement(true);
+                    item.setAccessibilityLabel(Some(&NSString::from_str(&accessibility_label)));
+                }
+                TrayMenuRowKind::SessionMeta => {
+                    let font = NSFont::systemFontOfSize_weight(11.0, 0.0);
+                    item.setAttributedTitle(Some(&attributed_columns(
+                        &title,
+                        &font,
+                        &NSColor::secondaryLabelColor(),
+                    )));
+                    item.setAccessibilityElement(false);
+                }
+                TrayMenuRowKind::Footer => item.setAccessibilityElement(true),
+            }
         }
     });
+}
+
+fn set_plain_row(
+    item: &objc2_app_kit::NSMenuItem,
+    title: &str,
+    size: f64,
+    weight: f64,
+    color: &NSColor,
+) {
+    let font = NSFont::systemFontOfSize_weight(size, weight);
+    item.setAttributedTitle(Some(&attributed(title, &font, color)));
 }
 
 fn status_symbol(state: &str) -> Option<Retained<NSImage>> {

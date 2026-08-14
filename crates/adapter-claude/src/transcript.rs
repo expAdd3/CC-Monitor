@@ -683,11 +683,11 @@ fn stable_key(parts: &[&str]) -> String {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 const SHA256_CHECKPOINT_MAGIC: &[u8; 4] = b"CCS2";
@@ -818,8 +818,7 @@ impl PrefixAnchor {
     }
 
     fn compress_block(&mut self, block: [u8; 64]) {
-        let block = sha2::digest::generic_array::GenericArray::clone_from_slice(&block);
-        sha2::compress256(&mut self.state, &[block]);
+        sha2::block_api::compress256(&mut self.state, &[block]);
     }
 
     #[cfg(unix)]
@@ -1017,8 +1016,7 @@ fn portable_file_identity(
 
 #[cfg(test)]
 mod portable_identity_tests {
-    use super::{portable_file_identity, PrefixAnchor};
-    use sha2::{Digest, Sha256};
+    use super::{hex_digest, portable_file_identity, PrefixAnchor};
     use std::{
         fs,
         time::{Duration, UNIX_EPOCH},
@@ -1068,7 +1066,7 @@ mod portable_identity_tests {
         assert_eq!(anchor.bytes_hashed, bytes.len() as u64);
         assert_eq!(
             anchor.digest(),
-            format!("{:x}", Sha256::digest(&bytes)),
+            hex_digest(&bytes),
             "the resume prefix and each newly parsed byte contribute exactly once"
         );
     }

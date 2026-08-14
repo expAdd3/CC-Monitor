@@ -12,8 +12,8 @@ pub const MAX_CONNECTIONS: u32 = 4;
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const BUSY_RETRY_DELAYS_MS: [u64; 4] = [1, 2, 4, 8];
 pub const BUSY_RETRY_BUDGET: Duration = Duration::from_millis(250);
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 13;
-// Only the desktop-owned migration entry point embeds this v1-v13 sequence.
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+// Only the desktop-owned migration entry point embeds the ordered schema.
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +87,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), StorageMigrationError> {
         return Err(unsupported_future_schema(found));
     }
     MIGRATOR.run(pool).await?;
+    crate::transcript::repair_usage_aggregates(pool).await?;
     Ok(())
 }
 

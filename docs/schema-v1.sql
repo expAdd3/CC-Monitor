@@ -1,5 +1,5 @@
--- Readable reference for the CC Monitor v13 SQLite schema.
--- Immutable files in crates/monitor-storage/migrations are authoritative.
+-- Readable reference for the CC Monitor v1 SQLite schema.
+-- The immutable file in crates/monitor-storage/migrations is authoritative.
 -- Only the desktop application runs migrations.
 
 PRAGMA foreign_keys = ON;
@@ -95,22 +95,6 @@ CREATE INDEX idx_usage_records_session
 CREATE INDEX idx_usage_records_day_model
     ON usage_records(local_day, model_id);
 
--- Compatibility-only v2 materialization; current reads aggregate usage_records.
-CREATE TABLE daily_usage (
-    local_day TEXT NOT NULL,
-    agent_kind TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    model_id TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
-    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
-    cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_write_tokens >= 0),
-    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_read_tokens >= 0),
-    cost_pico_usd INTEGER NOT NULL DEFAULT 0 CHECK (cost_pico_usd >= 0),
-    cost_known INTEGER NOT NULL DEFAULT 1 CHECK (cost_known IN (0, 1)),
-    updated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (local_day, agent_kind, session_id, model_id)
-) STRICT;
-
 CREATE TABLE transcript_cursors (
     transcript_path TEXT PRIMARY KEY NOT NULL,
     file_identity TEXT,
@@ -159,7 +143,8 @@ CREATE TABLE price_overrides (
     output_pico_usd_per_million INTEGER,
     cache_write_pico_usd_per_million INTEGER,
     cache_read_pico_usd_per_million INTEGER,
-    updated_at_ms INTEGER NOT NULL
+    updated_at_ms INTEGER NOT NULL,
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1))
 ) STRICT;
 
 CREATE TABLE installation (
@@ -229,12 +214,6 @@ CREATE INDEX idx_transcript_usage_stage_path
     ON transcript_usage_stage(transcript_path);
 CREATE INDEX idx_transcript_usage_stage_cleanup
     ON transcript_usage_stage(staged_at_ms);
-
--- Compatibility-only v11 object; current publication is one transaction.
-CREATE TABLE transcript_publish_generation (
-    transcript_path TEXT PRIMARY KEY NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation > 0)
-) STRICT;
 
 CREATE TABLE background_task_health (
     task TEXT PRIMARY KEY NOT NULL CHECK (task IN (

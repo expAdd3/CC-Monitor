@@ -25,3 +25,11 @@ These rules apply to the Tauri + Rust application.
 - Every product behavior needs an automated contract test where feasible.
   macOS tray, Dock, notification-click, and terminal activation behavior
   additionally require manual verification.
+- Use repository-defined `mise` tasks for development, testing, linting,
+  formatting, verification, and builds whenever a matching task exists. In
+  particular, prefer `mise run test`, `mise run lint`, `mise run format`,
+  `mise run verify`, `mise run build`, and `mise run clean` over their
+  underlying Cargo or Bun commands so the repository's pinned tool versions
+  are used.
+- Direct Cargo or Bun commands are allowed only for narrowly targeted
+  diagnostics or individual tests that do not have a matching `mise` task.

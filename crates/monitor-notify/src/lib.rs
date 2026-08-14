@@ -19,11 +19,8 @@ pub struct Notification {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Priority {
-    Min = 1,
-    Low = 2,
     Default = 3,
     High = 4,
-    Urgent = 5,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,33 +50,6 @@ impl NotifyError {
 #[async_trait]
 pub trait NotificationProvider: Send + Sync {
     async fn send(&self, notification: &Notification) -> Result<(), NotifyError>;
-}
-
-/// Adapter used to connect the engine to Tauri's notification
-/// plugin without making the core depend on Tauri.
-#[async_trait]
-pub trait DesktopTransport: Send + Sync {
-    async fn show(&self, notification: &Notification) -> Result<(), String>;
-}
-
-pub struct DesktopProvider<T> {
-    transport: T,
-}
-
-impl<T> DesktopProvider<T> {
-    pub fn new(transport: T) -> Self {
-        Self { transport }
-    }
-}
-
-#[async_trait]
-impl<T: DesktopTransport> NotificationProvider for DesktopProvider<T> {
-    async fn send(&self, notification: &Notification) -> Result<(), NotifyError> {
-        self.transport
-            .show(notification)
-            .await
-            .map_err(|_| NotifyError::Delivery("delivery_failed"))
-    }
 }
 
 #[derive(Clone)]

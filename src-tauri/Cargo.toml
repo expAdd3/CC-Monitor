@@ -26,7 +26,6 @@ serde_json.workspace = true
 sqlx.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
-tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 tokio.workspace = true
 uuid.workspace = true
@@ -38,6 +37,7 @@ objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSAttributedString",
+    "NSAccessibilityProtocols",
     "NSBezierPath",
     "NSButton",
     "NSCell",
@@ -70,8 +70,6 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSRange",
     "NSString",
 ] }
-tray-icon = { version = "0.24.1", default-features = false }
-
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util", "time"] }

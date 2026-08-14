@@ -9,7 +9,7 @@ use std::{
 const MAX_LOG_BYTES: u64 = 512 * 1024;
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-pub fn initialize(directory: &Path) -> std::io::Result<()> {
+pub(crate) fn initialize(directory: &Path) -> std::io::Result<()> {
     fs::create_dir_all(directory)?;
     let path = directory.join("cc-monitor.log");
     let _ = LOG_PATH.set(path);
@@ -17,7 +17,7 @@ pub fn initialize(directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn event(code: &'static str) {
+pub(crate) fn event(code: &'static str) {
     let Some(path) = LOG_PATH.get() else {
         return;
     };

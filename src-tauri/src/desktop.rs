@@ -1,8 +1,12 @@
 mod indexing;
+pub(crate) mod pricing;
 mod queries;
 mod settings;
 mod tray;
 mod workers;
+
+#[cfg(target_os = "macos")]
+pub(crate) use tray::{TrayMenuRow, TrayMenuRowKind};
 
 use crate::hook_lifecycle::{HookHealth, HookLifecycleState};
 use monitor_engine::{Engine, ProviderKind};
@@ -15,8 +19,8 @@ use std::sync::{
 };
 use tauri::{AppHandle, Emitter, Manager, State, Window, WindowEvent};
 
-pub use indexing::ReindexStarted;
-pub use settings::SettingsDto;
+pub(crate) use indexing::ReindexStarted;
+pub(crate) use settings::SettingsDto;
 
 const ACTIVE_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
 const DASHBOARD_SESSION_LIMIT: i64 = 100;
@@ -28,7 +32,7 @@ where
     serializer.serialize_str(&value.to_string())
 }
 
-pub struct DesktopState {
+pub(crate) struct DesktopState {
     pub pool: SqlitePool,
     hook_lifecycle: Arc<HookLifecycleState>,
     providers: Arc<tokio::sync::RwLock<settings::NotificationPolicy>>,
@@ -95,7 +99,7 @@ struct RevisionEvent {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DashboardSnapshot {
+pub(crate) struct DashboardSnapshot {
     revision: u64,
     counts: Counts,
     active_session_count: i64,
@@ -199,7 +203,7 @@ impl Default for IndexProgress {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CleanupResult {
+pub(crate) struct CleanupResult {
     raw_events_deleted: u64,
     notifications_deleted: u64,
 }
@@ -234,7 +238,7 @@ struct BackgroundHealth {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionDetail {
+pub(crate) struct SessionDetail {
     session: SessionRow,
     models: Vec<ModelUsage>,
     events: Vec<HistoryEvent>,
@@ -244,6 +248,14 @@ pub struct SessionDetail {
 #[serde(rename_all = "camelCase")]
 struct ModelUsage {
     model_id: String,
+    #[serde(serialize_with = "serialize_i64_as_decimal")]
+    input_tokens: i64,
+    #[serde(serialize_with = "serialize_i64_as_decimal")]
+    output_tokens: i64,
+    #[serde(serialize_with = "serialize_i64_as_decimal")]
+    cache_write_tokens: i64,
+    #[serde(serialize_with = "serialize_i64_as_decimal")]
+    cache_read_tokens: i64,
     #[serde(serialize_with = "serialize_i64_as_decimal")]
     tokens: i64,
     #[serde(serialize_with = "serialize_i64_as_decimal")]
@@ -262,7 +274,7 @@ struct HistoryEvent {
 }
 
 #[tauri::command]
-pub async fn get_dashboard_snapshot(
+pub(crate) async fn get_dashboard_snapshot(
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<DashboardSnapshot, String> {
     let mut value = state
@@ -274,7 +286,7 @@ pub async fn get_dashboard_snapshot(
 }
 
 #[tauri::command]
-pub async fn get_session_detail(
+pub(crate) async fn get_session_detail(
     session_id: String,
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<SessionDetail, String> {
@@ -287,7 +299,7 @@ pub async fn get_session_detail(
 }
 
 #[tauri::command]
-pub async fn get_settings(
+pub(crate) async fn get_settings(
     app: AppHandle,
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<SettingsDto, String> {
@@ -295,7 +307,7 @@ pub async fn get_settings(
 }
 
 #[tauri::command]
-pub async fn defer_hook_onboarding(
+pub(crate) async fn defer_hook_onboarding(
     app: AppHandle,
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<(), String> {
@@ -310,30 +322,33 @@ pub async fn defer_hook_onboarding(
 }
 
 #[tauri::command]
-pub async fn save_settings(
+pub(crate) async fn save_settings(
     app: AppHandle,
     settings: SettingsDto,
     state: State<'_, Arc<DesktopState>>,
-) -> Result<(), String> {
+) -> Result<SettingsDto, String> {
     settings::save_settings(app, settings, state).await
 }
 
 #[tauri::command]
-pub async fn test_ntfy(
+pub(crate) async fn test_ntfy(
     settings: SettingsDto,
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<(), String> {
     settings::test_ntfy(settings, state).await
 }
 
-#[tauri::command]
-pub fn show_dashboard(app: AppHandle, route: Option<String>) -> Result<(), String> {
-    tray::show_window(&app, route.as_deref())
-        .map_err(super::fixed_error(super::IpcError::DashboardOpen))
+pub(crate) fn show_window(app: &AppHandle, route: Option<&str>) -> tauri::Result<()> {
+    tray::show_window(app, route)
 }
 
 #[tauri::command]
-pub async fn clear_completed_history(
+pub(crate) fn show_dashboard(app: AppHandle, route: Option<String>) -> Result<(), String> {
+    show_window(&app, route.as_deref()).map_err(super::fixed_error(super::IpcError::DashboardOpen))
+}
+
+#[tauri::command]
+pub(crate) async fn clear_completed_history(
     app: AppHandle,
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<CleanupResult, String> {
@@ -350,7 +365,7 @@ pub async fn clear_completed_history(
 }
 
 #[tauri::command]
-pub async fn reindex_transcripts(
+pub(crate) async fn reindex_transcripts(
     app: AppHandle,
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<ReindexStarted, String> {
@@ -358,7 +373,7 @@ pub async fn reindex_transcripts(
 }
 
 #[tauri::command]
-pub fn open_notification_settings() -> Result<(), String> {
+pub(crate) fn open_notification_settings() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("/usr/bin/open")
@@ -371,8 +386,10 @@ pub fn open_notification_settings() -> Result<(), String> {
     Ok(())
 }
 
+const TEST_DESKTOP_NOTIFICATION_BODY: &str = "这是一条 CC Monitor 测试通知";
+
 #[tauri::command]
-pub async fn test_desktop_notification(
+pub(crate) async fn test_desktop_notification(
     app: AppHandle,
     state: State<'_, Arc<DesktopState>>,
 ) -> Result<(), String> {
@@ -385,7 +402,7 @@ pub async fn test_desktop_notification(
             app.clone(),
             Notification {
                 title: "CC Monitor".to_owned(),
-                body: "桌面通知已启用".to_owned(),
+                body: TEST_DESKTOP_NOTIFICATION_BODY.to_owned(),
                 priority: Priority::Default,
                 tag: "test".to_owned(),
                 session_id: None,
@@ -408,7 +425,7 @@ pub async fn test_desktop_notification(
     Ok(())
 }
 
-pub async fn initialize(
+pub(crate) async fn initialize(
     app: &AppHandle,
     pool: SqlitePool,
     hook_lifecycle: Arc<HookLifecycleState>,
@@ -431,7 +448,7 @@ pub async fn initialize(
     Ok(())
 }
 
-pub fn handle_window_event(window: &Window, event: &WindowEvent) {
+pub(crate) fn handle_window_event(window: &Window, event: &WindowEvent) {
     tray::handle_window_event(window, event);
 }
 
@@ -477,6 +494,14 @@ mod tests {
         assert_eq!(
             sanitize_background_error_code("incremental_index", "secret"),
             "index_failed"
+        );
+    }
+
+    #[test]
+    fn desktop_test_notification_uses_explicit_test_copy() {
+        assert_eq!(
+            TEST_DESKTOP_NOTIFICATION_BODY,
+            "这是一条 CC Monitor 测试通知"
         );
     }
 }

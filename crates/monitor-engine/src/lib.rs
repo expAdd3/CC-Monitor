@@ -8,12 +8,17 @@ use monitor_domain::{
     SessionId, SessionLifecycle, TurnState,
 };
 use monitor_notify::{diagnostic_code, Notification, NotificationProvider, Priority};
-use sqlx::{Row, SqlitePool};
-use std::collections::{BTreeSet, HashMap};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const SESSION_BATCH_SIZE: i64 = 8;
 pub const MAX_DELIVERY_ATTEMPTS: i64 = 3;
 const RETENTION_NOTIFICATION_BATCH_SIZE: u64 = 100;
+// Only the desktop process owns projection reduction. All Engine handles in
+// that process share this lock, so transcript publication and the ordinary
+// worker cannot commit stale snapshots over one another while the Hook remains
+// free to append evidence through its separate short-lived process.
+static REDUCER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -51,12 +56,12 @@ impl BatchResult {
         self.attempted.len()
     }
 
-    pub fn succeeded(&self) -> usize {
-        self.succeeded.len()
-    }
-
     pub fn quarantined(&self) -> usize {
         self.quarantined.len()
+    }
+
+    pub fn quarantined_session_ids(&self) -> impl Iterator<Item = &str> {
+        self.quarantined.iter().map(|key| key.session_id.0.as_str())
     }
 
     pub fn changed(&self) -> usize {
@@ -65,13 +70,6 @@ impl BatchResult {
 
     pub fn has_more(&self) -> bool {
         self.has_more
-    }
-
-    pub fn terminal_session_ids(&self) -> Vec<String> {
-        self.succeeded
-            .union(&self.quarantined)
-            .map(|key| key.session_id.0.clone())
-            .collect()
     }
 }
 
@@ -94,10 +92,6 @@ impl BatchError {
 
     pub fn into_parts(self) -> (BatchResult, EngineError) {
         (self.partial, self.source)
-    }
-
-    pub fn source_error(&self) -> &EngineError {
-        &self.source
     }
 }
 
@@ -143,10 +137,6 @@ pub struct Engine {
 impl Engine {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
-    }
-
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
     }
 
     pub async fn pending_sessions(&self) -> Result<Vec<(AgentKind, SessionId)>, EngineError> {
@@ -218,10 +208,7 @@ impl Engine {
                 Err(error @ EngineError::Storage(_)) => {
                     return Err(BatchError::new(result, error));
                 }
-                Err(error) => {
-                    self.quarantine_session(&session_id, error_code(&error), processed_at_ms)
-                        .await
-                        .map_err(|source| BatchError::new(result.clone(), source))?;
+                Err(_) => {
                     result.quarantined.insert(key);
                 }
             }
@@ -236,18 +223,35 @@ impl Engine {
         providers: &[ProviderKind],
         processed_at_ms: i64,
     ) -> Result<(), EngineError> {
+        self.process_session_inner(agent, session_id, providers, processed_at_ms, None)
+            .await
+    }
+
+    async fn process_session_inner(
+        &self,
+        agent: AgentKind,
+        session_id: &SessionId,
+        providers: &[ProviderKind],
+        processed_at_ms: i64,
+        pause_after_snapshot: Option<(&tokio::sync::Barrier, &tokio::sync::Barrier)>,
+    ) -> Result<(), EngineError> {
+        let _reducer_guard = REDUCER_LOCK.lock().await;
         let rows = sqlx::query(
             "SELECT id,agent_kind,session_id,source,source_event,occurred_at_ms,
                     received_at_ms,sequence_no,dedupe_key,payload_version,payload_json,
-                    transcript_path,notifications_allowed
+                    transcript_path,notifications_allowed,processed_at_ms,process_error
                FROM raw_events
-              WHERE agent_kind=?1 AND session_id=?2
+              WHERE agent_kind=?1 AND session_id=?2 AND process_error IS NULL
               ORDER BY occurred_at_ms,received_at_ms,dedupe_key",
         )
         .bind(&agent.0)
         .bind(&session_id.0)
         .fetch_all(&self.pool)
         .await?;
+        if let Some((snapshot_loaded, resume)) = pause_after_snapshot {
+            snapshot_loaded.wait().await;
+            resume.wait().await;
+        }
         if rows.is_empty() {
             let mut tx = self.pool.begin().await?;
             sqlx::query("DELETE FROM session_projection WHERE agent_kind=?1 AND session_id=?2")
@@ -258,6 +262,18 @@ impl Engine {
             tx.commit().await?;
             return Ok(());
         }
+        let event_ids = rows
+            .iter()
+            .map(|row| row.get::<String, _>("id"))
+            .collect::<Vec<_>>();
+        let pending_event_ids = rows
+            .iter()
+            .filter(|row| {
+                row.get::<Option<i64>, _>("processed_at_ms").is_none()
+                    && row.get::<Option<String>, _>("process_error").is_none()
+            })
+            .map(|row| row.get::<String, _>("id"))
+            .collect::<HashSet<_>>();
         let mut notifications_allowed = HashMap::new();
         let mut events = Vec::with_capacity(rows.len());
         let mut project_name = None;
@@ -265,8 +281,21 @@ impl Engine {
         let mut transcript_path: Option<String> = None;
         let mut client_bundle_id = None;
         for row in rows {
+            let id: String = row.get("id");
             let payload: serde_json::Value =
-                serde_json::from_str(row.get::<&str, _>("payload_json"))?;
+                match serde_json::from_str(row.get::<&str, _>("payload_json")) {
+                    Ok(payload) => payload,
+                    Err(source) => {
+                        let error = EngineError::InvalidEvent(source);
+                        self.quarantine_events(
+                            std::slice::from_ref(&id),
+                            error_code(&error),
+                            processed_at_ms,
+                        )
+                        .await?;
+                        return Err(error);
+                    }
+                };
             for (target, key) in [
                 (&mut project_name, "project_name"),
                 (&mut cwd, "cwd"),
@@ -278,17 +307,28 @@ impl Engine {
                     }
                 }
             }
-            let id: String = row.get("id");
             notifications_allowed
                 .insert(id.clone(), row.get::<i64, _>("notifications_allowed") != 0);
             if row.get::<&str, _>("source") == "transcript" {
                 transcript_path = row.get("transcript_path");
             }
+            let source = match event_source(row.get("source")) {
+                Ok(source) => source,
+                Err(error) => {
+                    self.quarantine_events(
+                        std::slice::from_ref(&id),
+                        error_code(&error),
+                        processed_at_ms,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
             events.push(AgentEvent {
                 id: EventId(id),
                 agent_kind: AgentKind(row.get("agent_kind")),
                 session_id: SessionId(row.get("session_id")),
-                source: event_source(row.get("source"))?,
+                source,
                 source_event: row.get("source_event"),
                 occurred_at_ms: row.get("occurred_at_ms"),
                 received_at_ms: row.get("received_at_ms"),
@@ -299,7 +339,12 @@ impl Engine {
             });
         }
         let reduction = reduce_at(events, processed_at_ms);
-        let projection = reduction.projection.ok_or(EngineError::InvalidProjection)?;
+        let Some(projection) = reduction.projection else {
+            let error = EngineError::InvalidProjection;
+            self.quarantine_events(&event_ids, error_code(&error), processed_at_ms)
+                .await?;
+            return Err(error);
+        };
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO session_projection (
@@ -364,10 +409,11 @@ impl Engine {
         .execute(&mut *tx)
         .await?;
         for edge in reduction.notifications {
-            if !notifications_allowed
-                .get(&edge.triggering_event_id.0)
-                .copied()
-                .unwrap_or(false)
+            if !pending_event_ids.contains(&edge.triggering_event_id.0)
+                || !notifications_allowed
+                    .get(&edge.triggering_event_id.0)
+                    .copied()
+                    .unwrap_or(false)
             {
                 continue;
             }
@@ -379,6 +425,7 @@ impl Engine {
                         turn_id: &turn_id,
                         kind: edge.kind,
                         revision: edge.projection_revision,
+                        triggering_event_id: &edge.triggering_event_id.0,
                         provider: *provider,
                         project_name: project_name.as_deref(),
                         created_at_ms: processed_at_ms,
@@ -387,34 +434,36 @@ impl Engine {
                 .await?;
             }
         }
-        sqlx::query(
-            "UPDATE raw_events SET processed_at_ms=?3,process_error=NULL
-              WHERE agent_kind=?1 AND session_id=?2",
-        )
-        .bind(&agent.0)
-        .bind(&session_id.0)
-        .bind(processed_at_ms)
-        .execute(&mut *tx)
-        .await?;
+        update_event_snapshot(&mut tx, &event_ids, processed_at_ms, None).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    async fn quarantine_session(
+    async fn quarantine_events(
         &self,
-        session_id: &SessionId,
+        event_ids: &[String],
         code: &'static str,
         processed_at_ms: i64,
     ) -> Result<(), EngineError> {
-        sqlx::query(
-            "UPDATE raw_events SET process_error=?2,processed_at_ms=?3
-              WHERE session_id=?1 AND processed_at_ms IS NULL",
-        )
-        .bind(&session_id.0)
-        .bind(code)
-        .bind(processed_at_ms)
-        .execute(&self.pool)
-        .await?;
+        let mut tx = self.pool.begin().await?;
+        for event_ids in event_ids.chunks(500) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "UPDATE raw_events SET processed_at_ms=COALESCE(processed_at_ms,",
+            );
+            query.push_bind(processed_at_ms);
+            query.push("),process_error=");
+            query.push_bind(code);
+            query.push(" WHERE id IN (");
+            {
+                let mut ids = query.separated(",");
+                for id in event_ids {
+                    ids.push_bind(id);
+                }
+            }
+            query.push(")");
+            query.build().execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -538,15 +587,9 @@ impl Engine {
     }
 
     pub async fn mark_sent(&self, id: &str, sent_at_ms: i64) -> Result<(), EngineError> {
-        sqlx::query(
-            "UPDATE notification_outbox
-                SET status='sent',sent_at_ms=?2,next_attempt_at_ms=NULL,last_error=NULL
-              WHERE id=?1 AND status='inflight'",
-        )
-        .bind(id)
-        .bind(sent_at_ms)
-        .execute(&self.pool)
-        .await?;
+        let mut tx = self.pool.begin().await?;
+        mark_sent_in_transaction(&mut tx, id, sent_at_ms).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -555,19 +598,21 @@ impl Engine {
         provider: ProviderKind,
         observed_at_ms: i64,
     ) -> Result<(), EngineError> {
-        sqlx::query(
-            "INSERT INTO notification_provider_health (
-                provider,consecutive_failures,last_error,last_failed_at_ms,recovered_at_ms
-             ) VALUES (?1,0,NULL,NULL,?2)
-             ON CONFLICT(provider) DO UPDATE SET
-                recovered_at_ms=CASE WHEN consecutive_failures>0 THEN ?2
-                                     ELSE recovered_at_ms END,
-                consecutive_failures=0,last_error=NULL",
-        )
-        .bind(provider.as_str())
-        .bind(observed_at_ms)
-        .execute(&self.pool)
-        .await?;
+        let mut tx = self.pool.begin().await?;
+        mark_provider_healthy_in_transaction(&mut tx, provider, observed_at_ms).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn mark_delivery_succeeded(
+        &self,
+        item: &OutboxItem,
+        observed_at_ms: i64,
+    ) -> Result<(), EngineError> {
+        let mut tx = self.pool.begin().await?;
+        mark_sent_in_transaction(&mut tx, &item.id, observed_at_ms).await?;
+        mark_provider_healthy_in_transaction(&mut tx, item.provider, observed_at_ms).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -637,11 +682,7 @@ impl Engine {
         observed_at_ms: i64,
     ) -> Result<(), EngineError> {
         match transport.send(&item.notification).await {
-            Ok(()) => {
-                self.mark_sent(&item.id, observed_at_ms).await?;
-                self.mark_provider_healthy(item.provider, observed_at_ms)
-                    .await
-            }
+            Ok(()) => self.mark_delivery_succeeded(item, observed_at_ms).await,
             Err(error) => self.mark_failed(item, error.code(), observed_at_ms).await,
         }
     }
@@ -659,25 +700,10 @@ impl Engine {
     }
 
     pub async fn retain_one_step(&self, cutoff_ms: i64) -> Result<RetentionStep, EngineError> {
-        let sessions = sqlx::query(
-            "SELECT agent_kind,session_id FROM session_projection
-              WHERE lifecycle='ended' AND last_observed_at_ms<?1
-                AND NOT EXISTS (
-                    SELECT 1 FROM notification_outbox o
-                     WHERE o.agent_kind=session_projection.agent_kind
-                       AND o.session_id=session_projection.session_id
-                       AND (
-                            o.status IN ('pending','inflight')
-                            OR (o.status='failed' AND o.attempt_count<?2)
-                       )
-                )
-              ORDER BY last_observed_at_ms LIMIT 4",
-        )
-        .bind(cutoff_ms)
-        .bind(MAX_DELIVERY_ATTEMPTS)
-        .fetch_all(&self.pool)
-        .await?;
-        let session_batch_full = sessions.len() == 4;
+        // Retention replaces the same session-owned rows as the reducer. Sharing
+        // its lock prevents a reducer snapshot loaded before deletion from
+        // recreating a projection after retention commits.
+        let _reducer_guard = REDUCER_LOCK.lock().await;
         let mut counts = RetentionCounts::default();
         let mut tx = self.pool.begin().await?;
         let terminal_notifications = sqlx::query(
@@ -700,6 +726,36 @@ impl Engine {
         .await?
         .rows_affected();
         counts.notifications_deleted += terminal_notifications;
+        // The first DELETE upgrades this deferred transaction to the single
+        // SQLite writer before eligible sessions are selected. A Hook event
+        // committed before that point is visible to the pending-event guard;
+        // one arriving afterwards cannot be inserted until this transaction
+        // commits, so it cannot be caught by the broad evidence cleanup below.
+        let sessions = sqlx::query(
+            "SELECT agent_kind,session_id FROM session_projection
+              WHERE lifecycle='ended' AND last_observed_at_ms<?1
+                AND NOT EXISTS (
+                    SELECT 1 FROM notification_outbox o
+                     WHERE o.agent_kind=session_projection.agent_kind
+                       AND o.session_id=session_projection.session_id
+                       AND (
+                            o.status IN ('pending','inflight')
+                            OR (o.status='failed' AND o.attempt_count<?2)
+                       )
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM raw_events e
+                     WHERE e.agent_kind=session_projection.agent_kind
+                       AND e.session_id=session_projection.session_id
+                       AND e.processed_at_ms IS NULL
+                )
+              ORDER BY last_observed_at_ms LIMIT 4",
+        )
+        .bind(cutoff_ms)
+        .bind(MAX_DELIVERY_ATTEMPTS)
+        .fetch_all(&mut *tx)
+        .await?;
+        let session_batch_full = sessions.len() == 4;
         for row in sessions {
             let agent: String = row.get("agent_kind");
             let session: String = row.get("session_id");
@@ -733,11 +789,77 @@ impl Engine {
     }
 }
 
+async fn update_event_snapshot(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    event_ids: &[String],
+    processed_at_ms: i64,
+    process_error: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    if event_ids.is_empty() {
+        return Ok(());
+    }
+    for event_ids in event_ids.chunks(500) {
+        let mut query = QueryBuilder::<Sqlite>::new("UPDATE raw_events SET processed_at_ms=");
+        query.push_bind(processed_at_ms);
+        query.push(",process_error=");
+        query.push_bind(process_error);
+        query.push(" WHERE processed_at_ms IS NULL AND id IN (");
+        {
+            let mut ids = query.separated(",");
+            for id in event_ids {
+                ids.push_bind(id);
+            }
+        }
+        query.push(")");
+        query.build().execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+async fn mark_sent_in_transaction(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    id: &str,
+    sent_at_ms: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE notification_outbox
+            SET status='sent',sent_at_ms=?2,next_attempt_at_ms=NULL,last_error=NULL
+          WHERE id=?1 AND status='inflight'",
+    )
+    .bind(id)
+    .bind(sent_at_ms)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn mark_provider_healthy_in_transaction(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    provider: ProviderKind,
+    observed_at_ms: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO notification_provider_health (
+            provider,consecutive_failures,last_error,last_failed_at_ms,recovered_at_ms
+         ) VALUES (?1,0,NULL,NULL,?2)
+         ON CONFLICT(provider) DO UPDATE SET
+            recovered_at_ms=CASE WHEN consecutive_failures>0 THEN ?2
+                                 ELSE recovered_at_ms END,
+            consecutive_failures=0,last_error=NULL",
+    )
+    .bind(provider.as_str())
+    .bind(observed_at_ms)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 struct NotificationInsert<'a> {
     session_id: &'a str,
     turn_id: &'a str,
     kind: NotificationKind,
     revision: u64,
+    triggering_event_id: &'a str,
     provider: ProviderKind,
     project_name: Option<&'a str>,
     created_at_ms: i64,
@@ -756,8 +878,8 @@ async fn insert_notification(
     };
     let revision = i64::try_from(notification.revision).unwrap_or(i64::MAX);
     let id = format!(
-        "claude:{}:{revision}:{kind_code}:{}",
-        notification.session_id,
+        "claude:{}:{kind_code}:{}",
+        notification.triggering_event_id,
         notification.provider.as_str()
     );
     sqlx::query(
@@ -896,6 +1018,14 @@ mod tests {
                 .unwrap(),
             1
         );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT id FROM notification_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "claude:stop:done:desktop",
+            "notification identity must follow the triggering event, not a replay revision",
+        );
     }
 
     #[tokio::test]
@@ -918,6 +1048,355 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn historical_insertion_does_not_replay_a_processed_notification_edge() {
+        let (_directory, pool) = pool().await;
+        insert_stop_evidence(&pool, true).await;
+        let engine = Engine::new(pool.clone());
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop],
+                3,
+            )
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO raw_events (
+                id,agent_kind,session_id,source,source_event,occurred_at_ms,
+                received_at_ms,dedupe_key,payload_json,transcript_path,
+                notifications_allowed
+             ) VALUES (
+                'historical','claude','session','transcript',
+                'TranscriptAssistantThinking',0,4,'historical','{}',
+                '/fixture/session.jsonl',0
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop],
+                5,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT revision FROM session_projection")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            3,
+            "historical evidence still participates in projection replay",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM notification_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "the previously processed Stop edge must not be enqueued at its shifted revision",
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_change_does_not_backfill_processed_notification_edges() {
+        let (_directory, pool) = pool().await;
+        insert_stop_evidence(&pool, true).await;
+        let engine = Engine::new(pool.clone());
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop],
+                3,
+            )
+            .await
+            .unwrap();
+
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop, ProviderKind::Ntfy],
+                4,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM notification_outbox WHERE provider='desktop'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1,
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM notification_outbox WHERE provider='ntfy'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_outbox_history_is_not_recreated_without_a_new_trigger() {
+        let (_directory, pool) = pool().await;
+        insert_stop_evidence(&pool, true).await;
+        let engine = Engine::new(pool.clone());
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop],
+                3,
+            )
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM notification_outbox")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop],
+                4,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM notification_outbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_projection_commit_cannot_be_overwritten_by_an_older_snapshot() {
+        let (_directory, pool) = pool().await;
+        sqlx::query(
+            "INSERT INTO raw_events (
+                id,agent_kind,session_id,source,source_event,occurred_at_ms,
+                received_at_ms,dedupe_key,payload_json,notifications_allowed
+             ) VALUES (
+                'prompt','claude','session','hook','UserPromptSubmit',1,1,
+                'prompt','{}',0
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let snapshot_loaded = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let resume_snapshot = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let older_pool = pool.clone();
+        let older_loaded = snapshot_loaded.clone();
+        let older_resume = resume_snapshot.clone();
+        let older = tokio::spawn(async move {
+            Engine::new(older_pool)
+                .process_session_inner(
+                    AgentKind::claude(),
+                    &SessionId("session".into()),
+                    &[],
+                    3,
+                    Some((&older_loaded, &older_resume)),
+                )
+                .await
+        });
+        snapshot_loaded.wait().await;
+
+        // Publish newer evidence after the first reducer loaded its snapshot.
+        // The Hook and transcript writers do not take REDUCER_LOCK, so evidence
+        // collection remains unblocked while projection reducers are serialized.
+        sqlx::query(
+            "INSERT INTO raw_events (
+                id,agent_kind,session_id,source,source_event,occurred_at_ms,
+                received_at_ms,dedupe_key,payload_json,notifications_allowed
+             ) VALUES ('stop','claude','session','hook','Stop',2,2,'stop','{}',0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let newer_pool = pool.clone();
+        let mut newer = tokio::spawn(async move {
+            Engine::new(newer_pool)
+                .process_session(AgentKind::claude(), &SessionId("session".into()), &[], 3)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut newer)
+                .await
+                .is_err(),
+            "a newer reducer must wait until the older snapshot commits"
+        );
+
+        resume_snapshot.wait().await;
+        older.await.unwrap().unwrap();
+        newer.await.unwrap().unwrap();
+
+        assert_eq!(
+            sqlx::query_as::<_, (String, i64)>(
+                "SELECT turn_state,revision FROM session_projection WHERE session_id='session'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            ("waiting".into(), 2),
+            "projection must include evidence committed before its serialized snapshot",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT processed_at_ms FROM raw_events WHERE id='stop'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            Some(3),
+        );
+        assert!(Engine::new(pool.clone())
+            .pending_sessions()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_arriving_after_projection_snapshot_remains_pending() {
+        let (_directory, pool) = pool().await;
+        insert_stop_evidence(&pool, false).await;
+        sqlx::query(
+            "CREATE TRIGGER insert_event_after_projection
+             AFTER INSERT ON session_projection
+             BEGIN
+                 INSERT INTO raw_events (
+                     id,agent_kind,session_id,source,source_event,occurred_at_ms,
+                     received_at_ms,dedupe_key,payload_json,notifications_allowed
+                 ) VALUES (
+                     'late','claude','session','hook','UserPromptSubmit',4,4,
+                     'late','{}',1
+                 );
+             END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let engine = Engine::new(pool.clone());
+        engine
+            .process_session(AgentKind::claude(), &SessionId("session".into()), &[], 3)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT processed_at_ms FROM raw_events WHERE id='late'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            None,
+            "an event outside the reducer snapshot must remain pending",
+        );
+        assert_eq!(
+            engine.pending_sessions().await.unwrap(),
+            vec![(AgentKind::claude(), SessionId("session".into()))],
+        );
+    }
+
+    #[tokio::test]
+    async fn quarantined_bad_row_does_not_poison_later_valid_evidence() {
+        let (_directory, pool) = pool().await;
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints=ON")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO raw_events (
+                id,agent_kind,session_id,source,source_event,occurred_at_ms,
+                received_at_ms,dedupe_key,payload_json,notifications_allowed
+             ) VALUES
+                ('bad','claude','session','hook','UserPromptSubmit',1,1,
+                 'bad','{',0),
+                ('valid','claude','session','hook','UserPromptSubmit',2,2,
+                 'valid','{}',0)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        drop(connection);
+
+        let engine = Engine::new(pool.clone());
+        assert!(matches!(
+            engine
+                .process_session(AgentKind::claude(), &SessionId("session".into()), &[], 3)
+                .await,
+            Err(EngineError::InvalidEvent(_)),
+        ));
+        assert_eq!(
+            sqlx::query_as::<_, (Option<i64>, Option<String>)>(
+                "SELECT processed_at_ms,process_error FROM raw_events WHERE id='bad'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            (Some(3), Some("engine_invalid_event".into())),
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (Option<i64>, Option<String>)>(
+                "SELECT processed_at_ms,process_error FROM raw_events WHERE id='valid'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            (None, None),
+            "a sibling valid event must remain pending rather than being quarantined",
+        );
+
+        engine
+            .process_session(AgentKind::claude(), &SessionId("session".into()), &[], 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_as::<_, (String, i64)>(
+                "SELECT turn_state,revision FROM session_projection WHERE session_id='session'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            ("running".into(), 1),
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (Option<i64>, Option<String>)>(
+                "SELECT processed_at_ms,process_error FROM raw_events WHERE id='valid'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            (Some(4), None),
+        );
+        assert!(engine.pending_sessions().await.unwrap().is_empty());
     }
 
     struct FailingProvider;
@@ -981,6 +1460,127 @@ mod tests {
             .await
             .unwrap(),
             ("sent".into(), 0, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_delivery_state_rolls_back_when_health_update_fails() {
+        let (_directory, pool) = pool().await;
+        insert_stop_evidence(&pool, true).await;
+        let engine = Engine::new(pool.clone());
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop],
+                3,
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_provider_health
+             BEFORE INSERT ON notification_provider_health
+             BEGIN
+                 SELECT RAISE(FAIL, 'injected health failure');
+             END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = engine
+            .dispatch_one(ProviderKind::Desktop, &SuccessfulProvider, 10)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EngineError::Storage(_)));
+        assert_eq!(
+            sqlx::query_as::<_, (String, Option<i64>)>(
+                "SELECT status,sent_at_ms FROM notification_outbox"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            ("inflight".into(), None),
+            "outbox sent state and provider health must commit atomically",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM notification_provider_health")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_cannot_delete_beneath_an_inflight_reducer_snapshot() {
+        let (_directory, pool) = pool().await;
+        for (id, source_event, at) in [("prompt", "UserPromptSubmit", 1), ("end", "SessionEnd", 2)]
+        {
+            sqlx::query(
+                "INSERT INTO raw_events (
+                    id,agent_kind,session_id,source,source_event,occurred_at_ms,
+                    received_at_ms,dedupe_key,payload_json,notifications_allowed
+                 ) VALUES (?1,'claude','session','hook',?2,?3,?3,?1,'{}',0)",
+            )
+            .bind(id)
+            .bind(source_event)
+            .bind(at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        Engine::new(pool.clone())
+            .process_session(AgentKind::claude(), &SessionId("session".into()), &[], 3)
+            .await
+            .unwrap();
+
+        let snapshot_loaded = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let resume_snapshot = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let reducer_pool = pool.clone();
+        let reducer_loaded = snapshot_loaded.clone();
+        let reducer_resume = resume_snapshot.clone();
+        let reducer = tokio::spawn(async move {
+            Engine::new(reducer_pool)
+                .process_session_inner(
+                    AgentKind::claude(),
+                    &SessionId("session".into()),
+                    &[],
+                    4,
+                    Some((&reducer_loaded, &reducer_resume)),
+                )
+                .await
+        });
+        snapshot_loaded.wait().await;
+
+        let retention_pool = pool.clone();
+        let mut retention =
+            tokio::spawn(async move { Engine::new(retention_pool).retain_one_step(10).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut retention)
+                .await
+                .is_err(),
+            "retention must wait until the reducer has published its snapshot",
+        );
+
+        resume_snapshot.wait().await;
+        reducer.await.unwrap().unwrap();
+        let step = retention.await.unwrap().unwrap();
+        assert_eq!(step.counts.raw_events_deleted, 2);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM session_projection")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "retention must not leave a projection resurrected from deleted evidence",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM raw_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
         );
     }
 
@@ -1077,6 +1677,78 @@ mod tests {
                 .await
                 .unwrap(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn retention_rechecks_a_session_that_resumes_after_candidate_selection() {
+        let (_directory, pool) = pool().await;
+        insert_stop_evidence(&pool, true).await;
+        let engine = Engine::new(pool.clone());
+        engine
+            .process_session(
+                AgentKind::claude(),
+                &SessionId("session".into()),
+                &[ProviderKind::Desktop],
+                3,
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE session_projection
+                SET lifecycle='ended',last_observed_at_ms=1
+              WHERE session_id='session'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE notification_outbox SET status='sent',created_at_ms=5
+              WHERE session_id='session'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER resume_during_retention
+             AFTER DELETE ON notification_outbox
+             WHEN OLD.session_id='session'
+             BEGIN
+                 UPDATE session_projection
+                    SET lifecycle='active',turn_state='running',last_observed_at_ms=20
+                  WHERE agent_kind='claude' AND session_id='session';
+                 INSERT INTO raw_events (
+                     id,agent_kind,session_id,source,source_event,occurred_at_ms,
+                     received_at_ms,dedupe_key,payload_json,notifications_allowed
+                 ) VALUES (
+                     'resumed','claude','session','hook','UserPromptSubmit',20,20,
+                     'resumed','{}',1
+                 );
+             END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        engine.retain_one_step(10).await.unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT lifecycle FROM session_projection WHERE session_id='session'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            "active",
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT processed_at_ms FROM raw_events WHERE id='resumed'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            None,
         );
     }
 }

@@ -18,7 +18,7 @@ async fn mark_as_future_schema(pool: &sqlx::SqlitePool) {
 }
 
 #[tokio::test]
-async fn fresh_and_existing_databases_stop_at_v13() {
+async fn fresh_and_existing_databases_stop_at_supported_version() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("state.db");
 
@@ -97,6 +97,10 @@ async fn direct_migration_also_rejects_future_schema() {
     let error = migrate(&pool).await.unwrap_err();
     assert_eq!(
         error.to_string(),
-        "unsupported_future_schema: database version 14 is newer than supported version 13"
+        format!(
+            "unsupported_future_schema: database version {} is newer than supported version {}",
+            SUPPORTED_SCHEMA_VERSION + 1,
+            SUPPORTED_SCHEMA_VERSION
+        )
     );
 }

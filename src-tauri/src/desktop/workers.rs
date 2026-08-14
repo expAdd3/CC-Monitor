@@ -1,11 +1,12 @@
 use super::{now_ms, settings::NotificationPolicy, DesktopState};
-use monitor_engine::{BatchResult, Engine, OutboxItem, ProviderKind};
-use monitor_notify::DesktopProvider;
-use monitor_notify::NtfyProvider;
+use monitor_engine::{BatchResult, Engine, ProviderKind};
 use sqlx::SqlitePool;
 use std::{
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 use tauri::{AppHandle, Manager};
@@ -117,24 +118,113 @@ pub(super) fn spawn_leader(app: AppHandle, state: Arc<DesktopState>) {
 }
 
 fn spawn(app: AppHandle, state: Arc<DesktopState>) {
-    let index_app = app.clone();
-    let index_state = state.clone();
     tauri::async_runtime::spawn(async move {
-        let cursor_count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM transcript_cursors")
-            .fetch_one(&index_state.pool)
-            .await;
-        match cursor_count {
-            Ok(cursor_count) => {
-                if initial_reindex_required(cursor_count)
-                    && super::indexing::begin_reindex(index_app, index_state).is_err()
-                {
-                    crate::logging::event("initial_index_start_failed");
-                }
-            }
-            _ => crate::logging::event("initial_index_probe_failed"),
+        let engine = state.engine();
+        let ready = pass_startup_barrier(
+            state.quitting.as_ref(),
+            || run_startup_reconciliation(&app, &state, &engine),
+            || await_initial_index_if_needed(app.clone(), state.clone()),
+        )
+        .await;
+        if !ready {
+            return;
         }
-    });
 
+        spawn_incremental_worker(&app, &state);
+        spawn_retention_worker(&app, &state);
+        run_ordinary_worker(app, state, engine).await;
+    });
+}
+
+async fn pass_startup_barrier<Reconcile, ReconcileFuture, InitialIndex, InitialIndexFuture>(
+    quitting: &AtomicBool,
+    reconcile: Reconcile,
+    initial_index: InitialIndex,
+) -> bool
+where
+    Reconcile: FnOnce() -> ReconcileFuture,
+    ReconcileFuture: std::future::Future<Output = ()>,
+    InitialIndex: FnOnce() -> InitialIndexFuture,
+    InitialIndexFuture: std::future::Future<Output = ()>,
+{
+    if quitting.load(Ordering::SeqCst) {
+        return false;
+    }
+    reconcile().await;
+    if quitting.load(Ordering::SeqCst) {
+        return false;
+    }
+    initial_index().await;
+    !quitting.load(Ordering::SeqCst)
+}
+
+async fn run_startup_reconciliation(app: &AppHandle, state: &DesktopState, engine: &Engine) {
+    let startup = now_ms();
+    let startup_health_changed = observe_engine_unit_result(
+        &state.pool,
+        "startup_reconciliation",
+        reconcile_startup_with_policy(engine, &state.providers, startup).await,
+        startup,
+    )
+    .await;
+    if startup_health_changed {
+        state.invalidate(app);
+    }
+}
+
+async fn await_initial_index_if_needed(app: AppHandle, state: Arc<DesktopState>) {
+    let cursor_count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM transcript_cursors")
+        .fetch_one(&state.pool)
+        .await;
+    let cursor_count = match cursor_count {
+        Ok(cursor_count) => cursor_count,
+        Err(_) => {
+            crate::logging::event("initial_index_probe_failed");
+            return;
+        }
+    };
+    if !initial_reindex_required(cursor_count) {
+        return;
+    }
+
+    let wait_for_terminal = match super::indexing::begin_reindex(app, state.clone()).await {
+        Ok(_) => true,
+        Err(code) if code == super::super::IpcError::ReindexAlreadyRunning.code() => true,
+        Err(_) => {
+            crate::logging::event("initial_index_start_failed");
+            false
+        }
+    };
+    if !wait_for_terminal
+        || !wait_for_index_terminal(state.indexing.clone(), state.quitting.clone()).await
+    {
+        return;
+    }
+    if state.index.lock().unwrap().state != "complete" {
+        crate::logging::event("initial_index_failed");
+    }
+}
+
+async fn wait_for_index_terminal(
+    indexing: Arc<tokio::sync::Mutex<()>>,
+    quitting: Arc<AtomicBool>,
+) -> bool {
+    tokio::select! {
+        guard = indexing.lock_owned() => {
+            drop(guard);
+            true
+        }
+        () = wait_for_quit(quitting) => false,
+    }
+}
+
+async fn wait_for_quit(quitting: Arc<AtomicBool>) {
+    while !quitting.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn spawn_incremental_worker(app: &AppHandle, state: &Arc<DesktopState>) {
     match app.path().home_dir() {
         Ok(home) => {
             let scan_state = state.clone();
@@ -151,29 +241,40 @@ fn spawn(app: AppHandle, state: Arc<DesktopState>) {
                             scan_state.pool.clone(),
                             scan_projects.clone(),
                             scan_state.providers.clone(),
+                            scan_state.indexing.clone(),
                         )
                         .await
                         {
-                            Ok(changed) => {
-                                let recovered = match record_background_success(
-                                    &scan_state.pool,
-                                    "incremental_index",
-                                    now_ms(),
-                                )
-                                .await
-                                {
-                                    Ok(recovered) => recovered,
-                                    Err(_) => {
-                                        crate::logging::event("background_health_write_failed");
-                                        false
-                                    }
-                                };
-                                if changed {
+                            Ok(Some(outcome)) => {
+                                let observed_at_ms = now_ms();
+                                let health_transitioned = if let Some(code) = outcome.error_code {
+                                    crate::logging::event("incremental_index_failed");
+                                    record_background_failure(
+                                        &scan_state.pool,
+                                        "incremental_index",
+                                        code,
+                                        observed_at_ms,
+                                    )
+                                    .await
+                                } else {
+                                    record_background_success(
+                                        &scan_state.pool,
+                                        "incremental_index",
+                                        observed_at_ms,
+                                    )
+                                    .await
+                                }
+                                .unwrap_or_else(|_| {
+                                    crate::logging::event("background_health_write_failed");
+                                    false
+                                });
+                                if outcome.changed {
                                     scan_state.invalidate_tray(&scan_app);
-                                } else if recovered {
+                                } else if health_transitioned {
                                     scan_state.invalidate(&scan_app);
                                 }
                             }
+                            Ok(None) => {}
                             Err(error) => {
                                 let code = incremental_index_error_code(&error);
                                 crate::logging::event("incremental_index_failed");
@@ -199,7 +300,9 @@ fn spawn(app: AppHandle, state: Arc<DesktopState>) {
         }
         Err(_) => crate::logging::event("transcript_root_resolve_failed"),
     }
+}
 
+fn spawn_retention_worker(app: &AppHandle, state: &Arc<DesktopState>) {
     let retention_pool = state.pool.clone();
     let retention_quitting = state.quitting.clone();
     let retention_state = state.clone();
@@ -210,162 +313,161 @@ fn spawn(app: AppHandle, state: Arc<DesktopState>) {
         now_ms,
         move || retention_state.invalidate(&retention_app),
     ));
-
-    tauri::async_runtime::spawn(async move {
-        let engine = state.engine();
-        let mut tray_fingerprint = String::new();
-        let mut tray_gate = TrayRefreshGate::default();
-        let startup = now_ms();
-        let startup_health_changed = observe_engine_unit_result(
-            &state.pool,
-            "startup_reconciliation",
-            reconcile_startup_with_policy(&engine, &state.providers, startup).await,
-            startup,
-        )
-        .await;
-        if startup_health_changed {
-            state.invalidate(&app);
-        }
-        let mut database_change_signal = app
-            .path()
-            .app_data_dir()
-            .ok()
-            .map(|directory| DatabaseChangeSignal::new(directory.join("state.db")));
-        let mut wake_schedule = WorkWakeSchedule::new(Instant::now());
-        let mut first_pass = true;
-        loop {
-            if state.quitting.load(Ordering::SeqCst) {
-                break;
-            }
-            if !first_pass {
-                tokio::time::sleep(if database_change_signal.is_some() {
-                    CHANGE_SIGNAL_POLL_INTERVAL
-                } else {
-                    FALLBACK_DATABASE_POLL_INTERVAL
-                })
-                .await;
-                let database_changed = match database_change_signal.as_mut() {
-                    Some(signal) => signal.changed(),
-                    None => true,
-                };
-                if !wake_schedule.should_run(Instant::now(), database_changed) {
-                    continue;
-                }
-            }
-            let loop_now = now_ms();
-            let processed = observe_engine_result(
-                &state.pool,
-                "engine_processing",
-                process_pending_with_policy(&engine, &state.providers, loop_now).await,
-                loop_now,
-            )
-            .await;
-            let reconciled = observe_engine_result(
-                &state.pool,
-                "engine_reconciliation",
-                engine.reconcile_stale_transcripts(loop_now).await,
-                loop_now,
-            )
-            .await;
-            let continue_immediately = processed.as_ref().map_or_else(
-                |(result, _)| result.has_more(),
-                |(result, _)| result.has_more(),
-            ) || reconciled.as_ref().map_or_else(
-                |(result, _)| result.has_more(),
-                |(result, _)| result.has_more(),
-            );
-            let health_changed = processed.as_ref().map_or_else(
-                |(_, transitioned)| *transitioned,
-                |(_, transitioned)| *transitioned,
-            ) || reconciled.as_ref().map_or_else(
-                |(_, transitioned)| *transitioned,
-                |(_, transitioned)| *transitioned,
-            );
-            let changed = processed.map_or_else(
-                |(result, _)| result.changed(),
-                |(result, _)| result.changed(),
-            ) + reconciled.map_or_else(
-                |(result, _)| result.changed(),
-                |(result, _)| result.changed(),
-            );
-            let mut dashboard_changed = health_changed;
-            let desktop = DesktopProvider::new(super::tray::TauriDesktopTransport(app.clone()));
-            let desktop_delivery_at = now_ms();
-            match engine
-                .dispatch_one(ProviderKind::Desktop, &desktop, desktop_delivery_at)
-                .await
-            {
-                Ok(true) => {
-                    log_delivery_health(&state.pool, "desktop", desktop_delivery_at).await;
-                    dashboard_changed = true;
-                }
-                Ok(false) => {}
-                Err(_) => crate::logging::event("outbox_desktop_storage_failed"),
-            }
-            let ntfy_delivery_at = now_ms();
-            match claim_ntfy_with_policy(&engine, &state.providers, ntfy_delivery_at).await {
-                Ok(Some((item, provider))) => {
-                    match engine
-                        .dispatch_claimed(&item, &provider, ntfy_delivery_at)
-                        .await
-                    {
-                        Ok(()) => {
-                            log_delivery_health(&state.pool, "ntfy", ntfy_delivery_at).await;
-                            dashboard_changed = true;
-                        }
-                        Err(_) => crate::logging::event("outbox_ntfy_storage_failed"),
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => crate::logging::event("outbox_ntfy_storage_failed"),
-            }
-            if changed > 0 {
-                state.invalidate_tray(&app);
-            } else if dashboard_changed {
-                state.invalidate(&app);
-            }
-            let tray_revision = state.tray_revision();
-            let tray_now = now_ms();
-            if tray_gate.needs_refresh(tray_revision, tray_now) {
-                match super::queries::tray_snapshot(&state.pool).await {
-                    Ok(value) => {
-                        let next_fingerprint = super::tray::fingerprint(&value, now_ms());
-                        if next_fingerprint == tray_fingerprint {
-                            tray_gate.mark_refreshed(tray_revision, tray_now);
-                        } else {
-                            match super::tray::refresh(&app, &value) {
-                                Ok(()) => {
-                                    tray_fingerprint = next_fingerprint;
-                                    tray_gate.mark_refreshed(tray_revision, tray_now);
-                                }
-                                Err(_) => crate::logging::event("tray_refresh_failed"),
-                            }
-                        }
-                    }
-                    Err(_) => crate::logging::event("tray_snapshot_failed"),
-                }
-            }
-            // Delivery above is the fairness boundary: when another bounded
-            // session batch remains, dispatch first, then continue without the
-            // 50 ms change-signal sleep.
-            first_pass = continue_immediately;
-        }
-    });
 }
 
-async fn claim_ntfy_with_policy(
+async fn run_ordinary_worker(app: AppHandle, state: Arc<DesktopState>, engine: Engine) {
+    let mut tray_fingerprint = String::new();
+    let mut tray_gate = TrayRefreshGate::default();
+    let mut database_change_signal = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|directory| DatabaseChangeSignal::new(directory.join("state.db")));
+    let mut wake_schedule = WorkWakeSchedule::new(Instant::now());
+    let mut first_pass = true;
+    loop {
+        if state.quitting.load(Ordering::SeqCst) {
+            break;
+        }
+        if !first_pass {
+            tokio::time::sleep(if database_change_signal.is_some() {
+                CHANGE_SIGNAL_POLL_INTERVAL
+            } else {
+                FALLBACK_DATABASE_POLL_INTERVAL
+            })
+            .await;
+            let database_changed = match database_change_signal.as_mut() {
+                Some(signal) => signal.changed(),
+                None => true,
+            };
+            if !wake_schedule.should_run(Instant::now(), database_changed) {
+                continue;
+            }
+        }
+        let loop_now = now_ms();
+        let processed = observe_engine_result(
+            &state.pool,
+            "engine_processing",
+            process_pending_with_policy(&engine, &state.providers, loop_now).await,
+            loop_now,
+        )
+        .await;
+        let reconciled = observe_engine_result(
+            &state.pool,
+            "engine_reconciliation",
+            engine.reconcile_stale_transcripts(loop_now).await,
+            loop_now,
+        )
+        .await;
+        let continue_immediately = processed.as_ref().map_or_else(
+            |(result, _)| result.has_more(),
+            |(result, _)| result.has_more(),
+        ) || reconciled.as_ref().map_or_else(
+            |(result, _)| result.has_more(),
+            |(result, _)| result.has_more(),
+        );
+        let health_changed = processed.as_ref().map_or_else(
+            |(_, transitioned)| *transitioned,
+            |(_, transitioned)| *transitioned,
+        ) || reconciled.as_ref().map_or_else(
+            |(_, transitioned)| *transitioned,
+            |(_, transitioned)| *transitioned,
+        );
+        let changed = processed.map_or_else(
+            |(result, _)| result.changed(),
+            |(result, _)| result.changed(),
+        ) + reconciled.map_or_else(
+            |(result, _)| result.changed(),
+            |(result, _)| result.changed(),
+        );
+        let mut dashboard_changed = health_changed;
+        let desktop = super::tray::TauriDesktopNotifier(app.clone());
+        let desktop_delivery_at = now_ms();
+        match engine
+            .dispatch_one(ProviderKind::Desktop, &desktop, desktop_delivery_at)
+            .await
+        {
+            Ok(true) => {
+                log_delivery_health(&state.pool, "desktop", desktop_delivery_at).await;
+                dashboard_changed = true;
+            }
+            Ok(false) => {}
+            Err(_) => crate::logging::event("outbox_desktop_storage_failed"),
+        }
+        let ntfy_delivery_at = now_ms();
+        match dispatch_ntfy_with_policy(&engine, &state.providers, ntfy_delivery_at).await {
+            Ok(true) => {
+                log_delivery_health(&state.pool, "ntfy", ntfy_delivery_at).await;
+                dashboard_changed = true;
+            }
+            Ok(false) => {}
+            Err(_) => crate::logging::event("outbox_ntfy_storage_failed"),
+        }
+        if changed > 0 {
+            state.invalidate_tray(&app);
+        } else if dashboard_changed {
+            state.invalidate(&app);
+        }
+        let tray_revision = state.tray_revision();
+        let tray_now = now_ms();
+        if tray_gate.needs_refresh(tray_revision, tray_now) {
+            match super::queries::tray_snapshot(&state.pool).await {
+                Ok(value) => {
+                    let next_fingerprint = super::tray::fingerprint(&value, tray_now);
+                    if next_fingerprint == tray_fingerprint {
+                        tray_gate.mark_refreshed(tray_revision, tray_now);
+                    } else {
+                        match super::tray::refresh(&app, &value) {
+                            Ok(()) => {
+                                tray_fingerprint = next_fingerprint;
+                                tray_gate.mark_refreshed(tray_revision, tray_now);
+                            }
+                            Err(_) => crate::logging::event("tray_refresh_failed"),
+                        }
+                    }
+                }
+                Err(_) => crate::logging::event("tray_snapshot_failed"),
+            }
+        }
+        // Delivery above is the fairness boundary: when another bounded
+        // session batch remains, dispatch first, then continue without the
+        // 50 ms change-signal sleep.
+        first_pass = continue_immediately;
+    }
+}
+
+async fn with_ntfy_policy_read<T, F, Fut>(
+    providers: &tokio::sync::RwLock<NotificationPolicy>,
+    operation: F,
+) -> Option<T>
+where
+    F: FnOnce(monitor_notify::NtfyProvider) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let policy = providers.read().await;
+    let provider = policy.ntfy_provider()?;
+    // Keep the read guard alive through the operation. A settings writer can
+    // therefore suppress and disable only after an already-claimed send has
+    // completed, and no old-policy send can begin after disable returns.
+    Some(operation(provider).await)
+}
+
+async fn dispatch_ntfy_with_policy(
     engine: &Engine,
     providers: &tokio::sync::RwLock<NotificationPolicy>,
     claimed_at_ms: i64,
-) -> Result<Option<(OutboxItem, NtfyProvider)>, monitor_engine::EngineError> {
-    let policy = providers.read().await;
-    let Some(provider) = policy.ntfy_provider() else {
-        return Ok(None);
-    };
-    Ok(engine
-        .claim_next(ProviderKind::Ntfy, claimed_at_ms)
-        .await?
-        .map(|item| (item, provider)))
+) -> Result<bool, monitor_engine::EngineError> {
+    with_ntfy_policy_read(providers, |provider| async move {
+        let Some(item) = engine.claim_next(ProviderKind::Ntfy, claimed_at_ms).await? else {
+            return Ok(false);
+        };
+        engine
+            .dispatch_claimed(&item, &provider, claimed_at_ms)
+            .await?;
+        Ok(true)
+    })
+    .await
+    .unwrap_or(Ok(false))
 }
 
 async fn reconcile_startup_with_policy(
@@ -704,7 +806,15 @@ fn engine_error_code(error: &monitor_engine::EngineError) -> &'static str {
 
 fn incremental_index_error_code(error: &anyhow::Error) -> &'static str {
     let lower = error.to_string().to_ascii_lowercase();
-    if lower.contains("database") || lower.contains("sqlite") {
+    if lower == "index_storage_failed" {
+        "index_storage_failed"
+    } else if lower == "index_permission_denied" {
+        "index_permission_denied"
+    } else if lower == "index_invalid_transcript" {
+        "index_invalid_transcript"
+    } else if lower == "index_io_failed" {
+        "index_io_failed"
+    } else if lower.contains("database") || lower.contains("sqlite") {
         "index_storage_failed"
     } else if lower.contains("permission") || lower.contains("denied") {
         "index_permission_denied"
@@ -725,6 +835,84 @@ mod tests {
     fn initial_index_is_needed_only_without_cursors() {
         assert!(initial_reindex_required(0));
         assert!(!initial_reindex_required(1));
+    }
+
+    #[tokio::test]
+    async fn startup_barrier_orders_reconciliation_index_terminal_and_workers() {
+        let quitting = AtomicBool::new(false);
+        let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reconcile_steps = steps.clone();
+        let index_steps = steps.clone();
+
+        let ready = pass_startup_barrier(
+            &quitting,
+            move || async move {
+                reconcile_steps.lock().unwrap().push("reconcile_started");
+                tokio::task::yield_now().await;
+                reconcile_steps.lock().unwrap().push("reconcile_complete");
+            },
+            move || async move {
+                assert_eq!(
+                    index_steps.lock().unwrap().as_slice(),
+                    ["reconcile_started", "reconcile_complete"]
+                );
+                index_steps.lock().unwrap().push("index_started");
+                tokio::task::yield_now().await;
+                index_steps.lock().unwrap().push("index_terminal");
+            },
+        )
+        .await;
+
+        assert!(ready);
+        steps.lock().unwrap().push("ordinary_workers");
+        assert_eq!(
+            steps.lock().unwrap().as_slice(),
+            [
+                "reconcile_started",
+                "reconcile_complete",
+                "index_started",
+                "index_terminal",
+                "ordinary_workers"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_barrier_stops_before_index_when_quit_arrives() {
+        let quitting = AtomicBool::new(false);
+        let index_called = Arc::new(AtomicBool::new(false));
+        let index_observation = index_called.clone();
+
+        let ready = pass_startup_barrier(
+            &quitting,
+            || async {
+                quitting.store(true, Ordering::SeqCst);
+            },
+            move || async move {
+                index_observation.store(true, Ordering::SeqCst);
+            },
+        )
+        .await;
+
+        assert!(!ready);
+        assert!(!index_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn initial_index_gate_waits_for_scan_guard_or_quit() {
+        let indexing = Arc::new(tokio::sync::Mutex::new(()));
+        let scan_guard = indexing.clone().lock_owned().await;
+        let quitting = Arc::new(AtomicBool::new(false));
+        let waiter = tokio::spawn(wait_for_index_terminal(indexing, quitting));
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        drop(scan_guard);
+        assert!(waiter.await.unwrap());
+
+        let indexing = Arc::new(tokio::sync::Mutex::new(()));
+        let _scan_guard = indexing.clone().lock_owned().await;
+        let quitting = Arc::new(AtomicBool::new(true));
+        assert!(!wait_for_index_terminal(indexing, quitting).await);
     }
 
     #[test]
@@ -754,6 +942,18 @@ mod tests {
         assert!(!signal.changed());
     }
 
+    #[test]
+    fn fixed_incremental_error_codes_survive_worker_sanitization() {
+        for code in [
+            "index_storage_failed",
+            "index_permission_denied",
+            "index_invalid_transcript",
+            "index_io_failed",
+        ] {
+            assert_eq!(incremental_index_error_code(&anyhow::anyhow!(code)), code);
+        }
+    }
+
     #[tokio::test]
     async fn idle_success_does_not_write_background_health() {
         let directory = tempfile::tempdir().unwrap();
@@ -775,5 +975,41 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn ntfy_policy_read_guard_spans_the_delivery_operation() {
+        let policy = super::super::settings::notification_policy(&super::super::SettingsDto {
+            ntfy_enabled: true,
+            ntfy_server: "https://ntfy.sh".into(),
+            ntfy_topic: "cc-monitor-test".into(),
+            ..super::super::SettingsDto::default()
+        })
+        .unwrap();
+        let providers = Arc::new(tokio::sync::RwLock::new(policy));
+        let entered = Arc::new(tokio::sync::Barrier::new(2));
+        let resume = Arc::new(tokio::sync::Barrier::new(2));
+        let operation_providers = providers.clone();
+        let operation_entered = entered.clone();
+        let operation_resume = resume.clone();
+        let operation = tokio::spawn(async move {
+            with_ntfy_policy_read(operation_providers.as_ref(), move |_| async move {
+                operation_entered.wait().await;
+                operation_resume.wait().await;
+            })
+            .await
+            .expect("ntfy is enabled");
+        });
+
+        entered.wait().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), providers.write())
+                .await
+                .is_err(),
+            "a settings writer must wait for the delivery boundary"
+        );
+        resume.wait().await;
+        operation.await.unwrap();
+        assert!(providers.try_write().is_ok());
     }
 }

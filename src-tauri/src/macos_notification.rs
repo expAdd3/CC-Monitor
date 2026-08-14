@@ -1,9 +1,11 @@
 use adapter_claude::terminal_identity::for_bundle_id;
 use monitor_notify::Notification;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 use tauri::AppHandle;
 
-pub fn initialize() {
+const ACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+pub(crate) fn initialize() {
     tauri::async_runtime::spawn(async {
         // macOS presents the prompt only while the authorization state is
         // undetermined. Repeating this call after a decision is harmless and
@@ -14,7 +16,7 @@ pub fn initialize() {
     });
 }
 
-pub async fn request_authorization() -> Result<(), &'static str> {
+pub(crate) async fn request_authorization() -> Result<(), &'static str> {
     let executable =
         std::env::current_exe().map_err(|_| "desktop_notification_requires_app_bundle")?;
     if !is_app_bundle_executable(&executable) {
@@ -43,7 +45,17 @@ fn authorization_result(granted: bool) -> Result<(), &'static str> {
         .ok_or("desktop_notification_permission_denied")
 }
 
-pub async fn show(app: AppHandle, notification: Notification) -> Result<(), String> {
+fn native_notification(title: &str, body: &str, action_label: &str) -> notify_rust::Notification {
+    let mut builder = notify_rust::Notification::new();
+    builder
+        .summary(title)
+        .body(body)
+        .action("open_session", action_label)
+        .timeout(ACTION_RESPONSE_TIMEOUT);
+    builder
+}
+
+pub(crate) async fn show(app: AppHandle, notification: Notification) -> Result<(), String> {
     let title = notification.title.clone();
     let body = notification.body.clone();
     let action_label = if notification
@@ -57,12 +69,7 @@ pub async fn show(app: AppHandle, notification: Notification) -> Result<(), Stri
         "查看会话"
     };
     let handle = tauri::async_runtime::spawn_blocking(move || {
-        let mut builder = notify_rust::Notification::new();
-        builder
-            .summary(&title)
-            .body(&body)
-            .action("open_session", action_label);
-        builder
+        native_notification(&title, &body, action_label)
             .show()
             .map_err(super::fixed_error(super::IpcError::DesktopDelivery))
     })
@@ -113,6 +120,14 @@ fn activate_terminal(value: &str) {
 #[cfg(test)]
 mod tests {
     use super::is_activation_action;
+
+    #[test]
+    fn actionable_notifications_have_a_bounded_response_lifetime() {
+        assert_eq!(
+            super::native_notification("title", "body", "open").timeout,
+            notify_rust::Timeout::Milliseconds(3_600_000),
+        );
+    }
 
     #[test]
     fn authorization_requires_an_app_bundle_executable() {

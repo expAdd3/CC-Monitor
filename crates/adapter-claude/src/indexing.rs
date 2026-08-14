@@ -2,10 +2,7 @@ use crate::{
     pricing::PriceCatalog,
     transcript::{ingest_streaming, visit_discovered, TranscriptError, TranscriptStreamItem},
 };
-use std::{
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexProgress {
@@ -39,11 +36,13 @@ pub struct IndexTask {
     pub result: tokio::task::JoinHandle<Result<IndexSummary, IndexError>>,
 }
 
-/// Runs whole-history file I/O on Tokio's blocking pool and streams each batch
-/// to a consumer. Neither result nor progress channels can block the worker.
-pub fn start_all_history(
+/// Runs whole-history file I/O on Tokio's blocking pool, using the supplied
+/// catalog and streaming each bounded batch to a consumer. Neither result nor
+/// progress channels can block the worker.
+pub fn start_all_history_with_catalog(
     projects_dir: PathBuf,
     now_ms: i64,
+    catalog: PriceCatalog,
     mut sink: impl FnMut(IndexedTranscript) -> Result<(), String> + Send + 'static,
     mut present_page_sink: impl FnMut(Vec<String>) -> Result<(), String> + Send + 'static,
     mut progress: impl FnMut(IndexProgress) + Send + 'static,
@@ -66,7 +65,6 @@ pub fn start_all_history(
                 return Err(IndexError::Discovery(error));
             }
         }
-        let catalog = PriceCatalog::default();
         let mut summary = IndexSummary::default();
         let mut sink_failure = None;
         let mut present_page = Vec::with_capacity(64);
@@ -147,11 +145,4 @@ pub fn start_all_history(
         }
     });
     IndexTask { result }
-}
-
-pub fn unix_now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
